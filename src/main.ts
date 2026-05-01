@@ -6,15 +6,18 @@ import { getFirebaseClient, isFirebaseConfigured, observeAnonymousUser, signInWi
 import { LobbyRepository, type LobbyRecord } from './net/lobby';
 import { NetworkMatchSession, type NetworkMatchStatus } from './net/matchSession';
 import { formatPeerStatus } from './net/peerStatus';
+import { GameplayPacketType } from './net/protocol';
 import { PeerConnectionSession, type ConnectionRole, type ConnectionState } from './net/webrtc';
 import { CanvasRenderer } from './render/canvasRenderer';
 import { LegacyImageStore, type LegacyImageLoadingProgress, legacyAssets } from './render/legacyAssets';
 import { DEFAULT_MATCH_SHIPS, SHIP_CATALOG, getShipCatalogEntry, type ShipCatalogId } from './ships';
 import { getAiInput, getAiMovementMode, type AiMovementMode } from './sim/ai';
+import type { Fixed } from './sim/fixed';
 import { hashState } from './sim/hash';
 import { createInitialState } from './sim/state';
 import { stepGame } from './sim/step';
-import type { GameState } from './sim/types';
+import { ANGLE_STEPS, type Angle } from './sim/trig';
+import type { ActorState, GameState, ProjectileState, ShipState } from './sim/types';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) {
@@ -23,6 +26,7 @@ if (!app) {
 
 const BUDGET_PRESETS = [100, 150, 200] as const;
 const AI_DEMO_ROUND_FRAMES = 30 * SIM_FPS;
+const NETWORK_CORRECTION_BLEND_FRAMES = 5;
 
 interface FleetShip {
   readonly uid: string;
@@ -34,6 +38,24 @@ interface BattleSession {
   readonly budget: number;
   readonly fleets: readonly [readonly FleetShip[], readonly FleetShip[]];
   readonly selectedShipUids: readonly [string | null, string | null];
+}
+
+interface PacketImpairmentSettings {
+  readonly delayMs: number;
+  readonly jitterMs: number;
+  readonly dropPct: number;
+}
+
+interface NetworkDebugSettings {
+  readonly localImpairment: PacketImpairmentSettings;
+  readonly aiHost: boolean;
+  readonly aiJoiner: boolean;
+}
+
+interface PresentationCorrection {
+  readonly from: GameState;
+  readonly totalFrames: number;
+  remainingFrames: number;
 }
 
 type AppPhase =
@@ -64,11 +86,21 @@ let peerSession: PeerConnectionSession | null = null;
 let peerConnectionState: ConnectionState = 'idle';
 let networkMatch: NetworkMatchSession | null = null;
 let networkMatchStatus: NetworkMatchStatus | null = null;
+let networkAiRound = 0;
 let lastInputStatusText = '';
 let lastInputDebugText = '';
+let inputStatusRenderTick = 0;
 let cleanupLobbyObserver: (() => void) | null = null;
 let fleetSerial = 0;
 let loadingProgress: LegacyImageLoadingProgress = { loaded: 0, failed: 0, total: Object.keys(legacyAssets).length };
+let networkDebugSettings: NetworkDebugSettings = {
+  localImpairment: { delayMs: 0, jitterMs: 0, dropPct: 0 },
+  aiHost: false,
+  aiJoiner: false,
+};
+let presentationCorrection: PresentationCorrection | null = null;
+const pendingGameplayTimers = new Set<number>();
+const MP_AI_IMPAIRMENT_DEFAULTS: PacketImpairmentSettings = { delayMs: 100, jitterMs: 50, dropPct: 3 };
 
 app.innerHTML = `
   <main class="legacy-screen">
@@ -77,6 +109,12 @@ app.innerHTML = `
       <div class="arena-frame">
         <canvas class="game-canvas" data-game-canvas aria-label="SkPow prototype arena"></canvas>
         <div class="menu-overlay" data-menu-overlay></div>
+        <div class="network-recovery-overlay network-recovery-overlay-hidden" data-network-recovery-overlay aria-live="polite">
+          <div class="network-recovery-card">
+            <h2>Resyncing Network Match</h2>
+            <p data-network-recovery-message>Waiting for peer snapshot...</p>
+          </div>
+        </div>
       </div>
     </section>
     <aside class="side-panel legacy-panel" data-player-hud="1"></aside>
@@ -111,6 +149,22 @@ app.innerHTML = `
           <button type="button" data-send-control>Send control ping</button>
           <button type="button" data-close-peer>Close peer</button>
         </div>
+        <label class="checkbox-row">
+          <input type="checkbox" data-mp-ai-host />
+          MP AI host
+        </label>
+        <label class="checkbox-row">
+          <input type="checkbox" data-mp-ai-joiner />
+          MP AI joiner
+        </label>
+        <div class="network-debug-grid">
+          <fieldset>
+            <legend>Local outgoing fake lag</legend>
+            <label>Delay ms <input type="number" min="0" max="5000" step="25" value="0" data-fake-lag-field="delayMs" /></label>
+            <label>Jitter ms <input type="number" min="0" max="5000" step="25" value="0" data-fake-lag-field="jitterMs" /></label>
+            <label>Drop % <input type="number" min="0" max="100" step="1" value="0" data-fake-lag-field="dropPct" /></label>
+          </fieldset>
+        </div>
       </details>
       <details class="panel-section secondary-panel">
         <summary>Debug Log</summary>
@@ -124,6 +178,8 @@ const legacyScreen = requiredElement<HTMLElement>('.legacy-screen');
 const canvas = requiredElement<HTMLCanvasElement>('[data-game-canvas]');
 const arenaFrame = requiredElement<HTMLElement>('.arena-frame');
 const menuOverlay = requiredElement<HTMLElement>('[data-menu-overlay]');
+const networkRecoveryOverlay = requiredElement<HTMLElement>('[data-network-recovery-overlay]');
+const networkRecoveryMessage = requiredElement<HTMLElement>('[data-network-recovery-message]');
 const gameStatus = requiredElement<HTMLElement>('[data-game-status]');
 const matchStatus = requiredElement<HTMLElement>('[data-match-status]');
 const inputStatus = requiredElement<HTMLElement>('[data-input-status]');
@@ -137,6 +193,9 @@ const createLobbyButton = requiredElement<HTMLButtonElement>('[data-create-lobby
 const sendControlButton = requiredElement<HTMLButtonElement>('[data-send-control]');
 const closePeerButton = requiredElement<HTMLButtonElement>('[data-close-peer]');
 const showOwnLobbiesCheckbox = requiredElement<HTMLInputElement>('[data-show-own-lobbies]');
+const mpAiHostCheckbox = requiredElement<HTMLInputElement>('[data-mp-ai-host]');
+const mpAiJoinerCheckbox = requiredElement<HTMLInputElement>('[data-mp-ai-joiner]');
+const fakeLagInputs = Array.from(document.querySelectorAll<HTMLInputElement>('[data-fake-lag-field]'));
 const hudContainers = Array.from(document.querySelectorAll<HTMLElement>('[data-player-hud]'));
 
 const legacyImages = new LegacyImageStore({
@@ -187,18 +246,30 @@ createFixedLoop(
     }
 
     if (appPhase.name === 'networkFight' && networkMatch && peerConnectionState === 'connected') {
-      const result = networkMatch.step(readPrimaryLocalInput());
+      if (shouldStartNextNetworkAiRound()) {
+        startNextNetworkAiRound();
+        return;
+      }
+
+      const result = networkMatch.step(readNetworkLocalInput());
       networkMatchStatus = result.status;
       sendGameplayPackets(result.packets);
       updatePeerStatus();
+      syncNetworkLoadoutFromMatch();
       const winnerId = result.state?.winnerId ?? networkMatch.currentState?.winnerId ?? null;
-      if (winnerId !== null && appPhase.handledWinnerId !== winnerId) {
+      if (shouldStartNextNetworkAiRound()) {
+        startNextNetworkAiRound();
+        return;
+      }
+      if (winnerId !== null && !networkMatchStatus?.aiDemo && appPhase.handledWinnerId !== winnerId) {
         appPhase = { name: 'networkResult', winnerId };
         renderMenu();
       }
     }
   },
   () => {
+    maybeUpdateInputStatus();
+
     if (!isCombatPhase()) {
       clearCanvas();
       gameStatus.textContent = 'Menu';
@@ -206,15 +277,13 @@ createFixedLoop(
       return;
     }
 
-    const renderState = networkMatch?.currentState ?? state;
+    const authoritativeState = networkMatch?.currentState ?? state;
+    const renderState = getPresentationState(authoritativeState);
     renderer.setAiDebugModes(getAiDebugModes(renderState));
     renderer.render(renderState);
-    gameStatus.textContent = `Frame ${renderState.frame} | Hash ${hashState(renderState).toString(16).padStart(8, '0')}`;
-    matchStatus.textContent = formatMatchStatus(renderState);
-    updateLegacyHud(renderState);
-    if (renderState.frame % 15 === 0) {
-      updateInputStatus();
-    }
+    gameStatus.textContent = `Frame ${authoritativeState.frame} | Hash ${hashState(authoritativeState).toString(16).padStart(8, '0')}`;
+    matchStatus.textContent = formatMatchStatus(authoritativeState);
+    updateLegacyHud(authoritativeState);
   },
 ).start();
 
@@ -227,7 +296,251 @@ function getAiDebugModes(renderState: GameState): readonly (AiMovementMode | nul
     return renderState.ships.map((ship) => (ship.id === 1 ? getAiMovementMode(renderState, ship.id) : null));
   }
 
+  if (appPhase.name === 'networkFight') {
+    return renderState.ships.map((ship) => {
+      if (ship.id === 0 && (networkMatchStatus?.aiDemo || networkDebugSettings.aiHost)) {
+        return getAiMovementMode(renderState, ship.id);
+      }
+
+      if (ship.id === 1 && (networkMatchStatus?.aiDemo || networkDebugSettings.aiJoiner)) {
+        return getAiMovementMode(renderState, ship.id);
+      }
+
+      return null;
+    });
+  }
+
   return [];
+}
+
+function maybeStartPresentationCorrection(
+  previousState: GameState | null,
+  session: NetworkMatchSession,
+): void {
+  const nextState = session.currentState;
+  if (!previousState || !nextState) {
+    return;
+  }
+
+  if (hashState(previousState) === hashState(nextState)) {
+    return;
+  }
+
+  const currentPresentation = peekPresentationState(previousState);
+  presentationCorrection = {
+    from: currentPresentation,
+    totalFrames: NETWORK_CORRECTION_BLEND_FRAMES,
+    remainingFrames: NETWORK_CORRECTION_BLEND_FRAMES,
+  };
+}
+
+function getPresentationState(authoritativeState: GameState): GameState {
+  if (!presentationCorrection) {
+    return authoritativeState;
+  }
+
+  const progress = getPresentationCorrectionProgress();
+  presentationCorrection.remainingFrames -= 1;
+  const easedProgress = easeOutCubic(Math.max(0, Math.min(1, progress)));
+  const renderState = blendGameState(presentationCorrection.from, authoritativeState, easedProgress, getLocalPresentationShipId());
+
+  if (presentationCorrection.remainingFrames <= 0) {
+    presentationCorrection = null;
+  }
+
+  return renderState;
+}
+
+function peekPresentationState(authoritativeState: GameState): GameState {
+  if (!presentationCorrection) {
+    return authoritativeState;
+  }
+
+  const progress = getPresentationCorrectionProgress();
+  return blendGameState(
+    presentationCorrection.from,
+    authoritativeState,
+    easeOutCubic(Math.max(0, Math.min(1, progress))),
+    getLocalPresentationShipId(),
+  );
+}
+
+function getPresentationCorrectionProgress(): number {
+  return presentationCorrection ? 1 - presentationCorrection.remainingFrames / presentationCorrection.totalFrames : 1;
+}
+
+function blendGameState(from: GameState, to: GameState, progress: number, immediateShipId: number | null): GameState {
+  const fromShips = new Map(from.ships.map((ship) => [ship.id, ship]));
+  const fromActors = new Map(from.actors.map((actor) => [actor.id, actor]));
+  const fromProjectiles = new Map(from.projectiles.map((projectile) => [projectile.id, projectile]));
+
+  return {
+    ...to,
+    ships: to.ships.map((ship) => (ship.id === immediateShipId ? ship : blendShip(fromShips.get(ship.id), ship, to, progress))),
+    actors: to.actors.map((actor) => blendActor(fromActors.get(actor.id), actor, to, progress)),
+    projectiles: to.projectiles.map((projectile) => blendProjectile(fromProjectiles.get(projectile.id), projectile, to, progress)),
+  };
+}
+
+function getLocalPresentationShipId(): number | null {
+  return appPhase.name === 'networkFight' ? (networkMatch?.status.localPlayerIndex ?? null) : null;
+}
+
+function blendShip(from: ShipState | undefined, to: ShipState, state: GameState, progress: number): ShipState {
+  if (!from || from.shipId !== to.shipId) {
+    return to;
+  }
+
+  return {
+    ...to,
+    x: lerpWrappedFixed(from.x, to.x, state.arena.width, progress),
+    y: lerpWrappedFixed(from.y, to.y, state.arena.height, progress),
+    angle: lerpAngle(from.angle, to.angle, progress),
+    custom: {
+      ...to.custom,
+      cameraOverrideX:
+        from.custom.cameraOverrideX !== undefined && to.custom.cameraOverrideX !== undefined
+          ? lerpWrappedFixed(from.custom.cameraOverrideX, to.custom.cameraOverrideX, state.arena.width, progress)
+          : to.custom.cameraOverrideX,
+      cameraOverrideY:
+        from.custom.cameraOverrideY !== undefined && to.custom.cameraOverrideY !== undefined
+          ? lerpWrappedFixed(from.custom.cameraOverrideY, to.custom.cameraOverrideY, state.arena.height, progress)
+          : to.custom.cameraOverrideY,
+    },
+  };
+}
+
+function blendActor(from: ActorState | undefined, to: ActorState, state: GameState, progress: number): ActorState {
+  if (!from || from.kind !== to.kind) {
+    return to;
+  }
+
+  return {
+    ...to,
+    x: lerpWrappedFixed(from.x, to.x, state.arena.width, progress),
+    y: lerpWrappedFixed(from.y, to.y, state.arena.height, progress),
+    angle: lerpAngle(from.angle, to.angle, progress),
+  };
+}
+
+function blendProjectile(from: ProjectileState | undefined, to: ProjectileState, state: GameState, progress: number): ProjectileState {
+  if (!from || from.kind !== to.kind) {
+    return to;
+  }
+
+  return {
+    ...to,
+    x: lerpWrappedFixed(from.x, to.x, state.arena.width, progress),
+    y: lerpWrappedFixed(from.y, to.y, state.arena.height, progress),
+    angle: lerpAngle(from.angle, to.angle, progress),
+  };
+}
+
+function lerpWrappedFixed(from: Fixed, to: Fixed, max: Fixed, progress: number): Fixed {
+  const delta = getWrappedFixedDelta(to, from, max);
+  return wrapSignedFixed(Math.round(from + delta * progress) as Fixed, max);
+}
+
+function getWrappedFixedDelta(to: Fixed, from: Fixed, max: Fixed): number {
+  const radius = max / 2;
+  let delta = to - from;
+  if (delta > radius) {
+    delta -= max;
+  } else if (delta < -radius) {
+    delta += max;
+  }
+  return delta;
+}
+
+function wrapSignedFixed(value: Fixed, max: Fixed): Fixed {
+  const radius = max / 2;
+  if (value < -radius) {
+    return (value + max) as Fixed;
+  }
+
+  if (value > radius) {
+    return (value - max) as Fixed;
+  }
+
+  return value;
+}
+
+function lerpAngle(from: Angle, to: Angle, progress: number): Angle {
+  const radius = ANGLE_STEPS / 2;
+  let delta = to - from;
+  if (delta > radius) {
+    delta -= ANGLE_STEPS;
+  } else if (delta < -radius) {
+    delta += ANGLE_STEPS;
+  }
+
+  return (((Math.round(from + delta * progress) % ANGLE_STEPS) + ANGLE_STEPS) % ANGLE_STEPS) as Angle;
+}
+
+function easeOutCubic(value: number): number {
+  return 1 - (1 - value) ** 3;
+}
+
+function readNetworkLocalInput(): number {
+  if (!networkMatch) {
+    return readPrimaryLocalInput();
+  }
+
+  const status = networkMatch.status;
+  const aiEnabled = status.aiDemo || (status.role === 'host' ? networkDebugSettings.aiHost : networkDebugSettings.aiJoiner);
+  const currentState = networkMatch.currentState;
+  if (aiEnabled && currentState) {
+    return getAiInput(currentState, status.localPlayerIndex);
+  }
+
+  return readPrimaryLocalInput();
+}
+
+function shouldStartNextNetworkAiRound(): boolean {
+  if (!networkMatch || networkMatch.status.role !== 'host' || !networkMatch.status.aiDemo || peerConnectionState !== 'connected') {
+    return false;
+  }
+
+  const currentState = networkMatch.currentState;
+  return currentState !== null && (currentState.winnerId !== null || currentState.frame >= AI_DEMO_ROUND_FRAMES);
+}
+
+function startNextNetworkAiRound(): void {
+  if (!networkMatch || networkMatch.status.role !== 'host') {
+    return;
+  }
+
+  networkAiRound += 1;
+  currentLoadout = chooseRandomNetworkAiLoadout();
+  const seed = Date.now() >>> 0;
+  clearPendingGameplayPackets();
+  state = createInitialState(seed, currentLoadout);
+  renderer.setShipLoadout(currentLoadout);
+  renderHud(currentLoadout);
+  networkMatch = new NetworkMatchSession('host', { roundId: networkAiRound, seed, loadout: currentLoadout, aiDemo: true, readyImmediately: true });
+  networkMatchStatus = networkMatch.status;
+  presentationCorrection = null;
+  sendGameplayPackets(networkMatch.takeOutgoingPackets());
+  updatePeerStatus();
+  log(
+    `Network AI round ${networkAiRound + 1}: ${getShipCatalogEntry(currentLoadout[0]).name} vs ${getShipCatalogEntry(currentLoadout[1]).name}`,
+  );
+}
+
+function syncNetworkLoadoutFromMatch(): void {
+  const ships = networkMatch?.currentState?.ships;
+  if (!ships || ships.length < 2) {
+    return;
+  }
+
+  const loadout: MatchLoadout = [ships[0].shipId, ships[1].shipId];
+  if (loadout[0] === currentLoadout[0] && loadout[1] === currentLoadout[1]) {
+    return;
+  }
+
+  currentLoadout = loadout;
+  renderer.setShipLoadout(currentLoadout);
+  renderHud(currentLoadout);
 }
 
 if (!isFirebaseConfigured() || !firebase || !lobbyRepository) {
@@ -283,6 +596,22 @@ showOwnLobbiesCheckbox.addEventListener('change', () => {
   renderLobbies();
   renderMenu();
 });
+
+mpAiHostCheckbox.addEventListener('change', () => {
+  networkDebugSettings = { ...networkDebugSettings, aiHost: mpAiHostCheckbox.checked };
+  maybeApplyMpAiImpairmentDefaults(mpAiHostCheckbox.checked);
+});
+
+mpAiJoinerCheckbox.addEventListener('change', () => {
+  networkDebugSettings = { ...networkDebugSettings, aiJoiner: mpAiJoinerCheckbox.checked };
+  maybeApplyMpAiImpairmentDefaults(mpAiJoinerCheckbox.checked);
+});
+
+for (const input of fakeLagInputs) {
+  input.addEventListener('change', () => {
+    updateFakeLagSetting(input);
+  });
+}
 
 function handleMenuAction(button: HTMLButtonElement): void {
   const action = button.dataset.action;
@@ -352,6 +681,7 @@ function renderMenu(): void {
   legacyScreen.classList.toggle('legacy-screen-menu-active', !combatPhase);
   arenaFrame.classList.toggle('arena-frame-menu-active', !combatPhase);
   menuOverlay.classList.toggle('menu-overlay-hidden', combatPhase);
+  updateNetworkRecoveryOverlay();
 
   switch (appPhase.name) {
     case 'loading':
@@ -769,6 +1099,10 @@ function chooseRandomCatalogShip(): ShipCatalogId {
   return SHIP_CATALOG[Math.floor(Math.random() * SHIP_CATALOG.length)].id;
 }
 
+function chooseRandomNetworkAiLoadout(): MatchLoadout {
+  return [chooseRandomCatalogShip(), chooseRandomCatalogShip()];
+}
+
 function generateRandomFleet(budget: number, prefix: string): readonly FleetShip[] {
   const fleet: FleetShip[] = [];
   let remaining = budget;
@@ -899,14 +1233,24 @@ function createPeerSession(
       peerConnectionState = connectionState;
       if (connectionState === 'connected' && !networkMatch) {
         log(`Network match using ${budget} point lobby budget.`);
-        currentLoadout = DEFAULT_MATCH_SHIPS;
+        networkAiRound = 0;
+        currentLoadout = role === 'host' && networkDebugSettings.aiHost ? chooseRandomNetworkAiLoadout() : DEFAULT_MATCH_SHIPS;
+        const seed = Date.now() >>> 0;
         renderer.setShipLoadout(currentLoadout);
         renderHud(currentLoadout);
-        state = createInitialState();
-        networkMatch = new NetworkMatchSession(role);
+        state = createInitialState(seed, currentLoadout);
+        networkMatch = new NetworkMatchSession(role, {
+          roundId: networkAiRound,
+          seed,
+          loadout: currentLoadout,
+          aiDemo: role === 'host' && networkDebugSettings.aiHost,
+          readyImmediately: true,
+        });
+        presentationCorrection = null;
         sendGameplayPackets(networkMatch.takeOutgoingPackets());
         networkMatchStatus = networkMatch.status;
         appPhase = { name: 'networkFight', handledWinnerId: null };
+        log(`Network debug: ${formatNetworkDebugSettings(role)}`);
       }
 
       if (connectionState === 'closed' || connectionState === 'failed') {
@@ -929,9 +1273,20 @@ function createPeerSession(
       }
 
       try {
+        const isSessionConfig = message[1] === GameplayPacketType.SessionConfig;
+        if (isSessionConfig) {
+          clearPendingGameplayPackets();
+        }
+        const previousState = networkMatch.currentState;
         networkMatchStatus = networkMatch.receiveGameplayMessage(message);
+        maybeStartPresentationCorrection(previousState, networkMatch);
         sendGameplayPackets(networkMatch.takeOutgoingPackets());
         networkMatchStatus = networkMatch.status;
+        syncNetworkLoadoutFromMatch();
+        if (isSessionConfig && networkMatchStatus.aiDemo) {
+          appPhase = { name: 'networkFight', handledWinnerId: null };
+          renderMenu();
+        }
         updatePeerStatus();
       } catch (error) {
         log(`Gameplay packet failed: ${readError(error)}`);
@@ -941,6 +1296,8 @@ function createPeerSession(
 }
 
 function closePeer(): void {
+  clearPendingGameplayPackets();
+  presentationCorrection = null;
   peerSession?.close();
   peerSession = null;
   networkMatch = null;
@@ -951,13 +1308,72 @@ function closePeer(): void {
 
 function sendGameplayPackets(packets: readonly Uint8Array[]): void {
   for (const packet of packets) {
-    peerSession?.sendGameplayMessage(packet);
+    sendGameplayPacket(packet);
   }
+}
+
+function sendGameplayPacket(packet: Uint8Array): void {
+  const activePeer = peerSession;
+  if (!activePeer) {
+    return;
+  }
+
+  if (packet[1] === GameplayPacketType.SessionConfig) {
+    activePeer.sendGameplayMessage(packet);
+    return;
+  }
+
+  const settings = getPacketImpairmentSettings();
+  if (!settings || !shouldImpairPacket(settings)) {
+    activePeer.sendGameplayMessage(packet);
+    return;
+  }
+
+  if (settings.dropPct > 0 && Math.random() * 100 < settings.dropPct) {
+    return;
+  }
+
+  const delayMs = settings.delayMs + (settings.jitterMs > 0 ? Math.round(Math.random() * settings.jitterMs) : 0);
+  if (delayMs <= 0) {
+    activePeer.sendGameplayMessage(packet);
+    return;
+  }
+
+  const timerId = window.setTimeout(() => {
+    pendingGameplayTimers.delete(timerId);
+    activePeer.sendGameplayMessage(packet);
+  }, delayMs);
+  pendingGameplayTimers.add(timerId);
+}
+
+function getPacketImpairmentSettings(): PacketImpairmentSettings | null {
+  return networkMatch ? networkDebugSettings.localImpairment : null;
+}
+
+function shouldImpairPacket(settings: PacketImpairmentSettings): boolean {
+  return settings.delayMs > 0 || settings.jitterMs > 0 || settings.dropPct > 0;
+}
+
+function clearPendingGameplayPackets(): void {
+  for (const timerId of pendingGameplayTimers) {
+    window.clearTimeout(timerId);
+  }
+  pendingGameplayTimers.clear();
 }
 
 function log(message: string): void {
   const line = `[${new Date().toLocaleTimeString()}] ${message}`;
   debugLog.textContent = `${line}\n${debugLog.textContent ?? ''}`.slice(0, 4000);
+}
+
+function formatNetworkDebugSettings(_role: ConnectionRole): string {
+  const impairment = networkDebugSettings.localImpairment;
+  const aiText = `AI host ${networkDebugSettings.aiHost ? 'on' : 'off'}, AI joiner ${networkDebugSettings.aiJoiner ? 'on' : 'off'}`;
+  return `${aiText}; outgoing ${formatPacketImpairment(impairment)}`;
+}
+
+function formatPacketImpairment(settings: PacketImpairmentSettings): string {
+  return `${settings.delayMs}ms delay + ${settings.jitterMs}ms jitter, ${settings.dropPct}% drop`;
 }
 
 function updateInputStatus(): void {
@@ -981,6 +1397,13 @@ function updateInputStatus(): void {
   }
 }
 
+function maybeUpdateInputStatus(): void {
+  inputStatusRenderTick = (inputStatusRenderTick + 1) % 15;
+  if (inputStatusRenderTick === 0) {
+    updateInputStatus();
+  }
+}
+
 function formatGamepadStatus(
   gamepad: ReturnType<typeof readInputDeviceStatus>['gamepads'][number],
   index: number,
@@ -1000,6 +1423,17 @@ function formatPressedButton(button: ReturnType<typeof readInputDeviceStatus>['g
 function updatePeerStatus(): void {
   peerSummary.textContent = formatPeerSummary(peerConnectionState, networkMatchStatus);
   peerStatus.textContent = formatPeerStatus(peerConnectionState, networkMatchStatus);
+  updateNetworkRecoveryOverlay();
+}
+
+function updateNetworkRecoveryOverlay(): void {
+  const shouldShow = appPhase.name === 'networkFight' && networkMatchStatus?.paused === true;
+  networkRecoveryOverlay.classList.toggle('network-recovery-overlay-hidden', !shouldShow);
+  if (shouldShow) {
+    networkRecoveryMessage.textContent = networkMatchStatus?.recoveryWaitingForPeer
+      ? 'Snapshots reconciled. Waiting for the peer to finish resync...'
+      : 'Connection recovered or stalled. Exchanging snapshots before play resumes...';
+  }
 }
 
 function formatPeerSummary(connectionState: ConnectionState, status: NetworkMatchStatus | null): string {
@@ -1007,9 +1441,15 @@ function formatPeerSummary(connectionState: ConnectionState, status: NetworkMatc
     return `Peer: ${connectionState}`;
   }
 
-  const syncState = status.desync ? 'desynced' : 'sync ok';
   const readyState = status.ready ? 'ready' : 'handshaking';
-  return `Peer: ${connectionState} | ${readyState} | ${syncState} | rollback ${status.rollbackCount}`;
+  const ownerState = status.lastOwnerStateFrame === null ? 'owner pending' : `owner ${status.lastOwnerStateFrame}`;
+  if (status.paused) {
+    if (status.recoveryWaitingForPeer) {
+      return `Peer: ${connectionState} | ${readyState} | Recovery finishing | ${ownerState}`;
+    }
+    return `Peer: ${connectionState} | ${readyState} | Network recovery paused | ${ownerState}`;
+  }
+  return `Peer: ${connectionState} | ${readyState} | ${ownerState}`;
 }
 
 function formatMatchStatus(renderState: GameState): string {
@@ -1019,6 +1459,12 @@ function formatMatchStatus(renderState: GameState): string {
 
   if (renderState.winnerId === null) {
     if (appPhase.name === 'networkFight') {
+      if (networkMatchStatus?.paused) {
+        if (networkMatchStatus.recoveryWaitingForPeer) {
+          return 'Network recovery finishing';
+        }
+        return 'Network recovery paused';
+      }
       return 'Online match active';
     }
     if (appPhase.name === 'aiDemo') {
@@ -1229,6 +1675,70 @@ function readBudget(button: HTMLButtonElement): number {
   }
 
   return clampBudget(Number(button.dataset.budget ?? 100));
+}
+
+function updateFakeLagSetting(input: HTMLInputElement): void {
+  const field = input.dataset.fakeLagField;
+  if (!isFakeLagField(field)) {
+    return;
+  }
+
+  const nextValue = readFakeLagNumber(input, field);
+  networkDebugSettings = {
+    ...networkDebugSettings,
+    localImpairment: {
+      ...networkDebugSettings.localImpairment,
+      [field]: nextValue,
+    },
+  };
+
+  input.value = String(nextValue);
+}
+
+function maybeApplyMpAiImpairmentDefaults(enabled: boolean): void {
+  if (!enabled || shouldImpairPacket(networkDebugSettings.localImpairment)) {
+    return;
+  }
+
+  networkDebugSettings = {
+    ...networkDebugSettings,
+    localImpairment: MP_AI_IMPAIRMENT_DEFAULTS,
+  };
+  syncFakeLagInputs();
+}
+
+function syncFakeLagInputs(): void {
+  for (const input of fakeLagInputs) {
+    const field = input.dataset.fakeLagField;
+    if (!isFakeLagField(field)) {
+      continue;
+    }
+
+    input.value = String(networkDebugSettings.localImpairment[field]);
+  }
+}
+
+function readFakeLagNumber(input: HTMLInputElement, field: keyof PacketImpairmentSettings): number {
+  const value = Number(input.value);
+  switch (field) {
+    case 'delayMs':
+    case 'jitterMs':
+      return clampInteger(value, 0, 5000, 0);
+    case 'dropPct':
+      return clampInteger(value, 0, 100, 0);
+  }
+}
+
+function isFakeLagField(value: string | undefined): value is keyof PacketImpairmentSettings {
+  return value === 'delayMs' || value === 'jitterMs' || value === 'dropPct';
+}
+
+function clampInteger(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.max(min, Math.min(max, Math.round(value)));
 }
 
 function clampBudget(value: number): number {

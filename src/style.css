@@ -157,6 +157,43 @@ button:disabled {
   display: none;
 }
 
+.network-recovery-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  background: rgba(2, 4, 13, 0.68);
+  color: #e6edf3;
+  text-align: center;
+}
+
+.network-recovery-overlay-hidden {
+  display: none;
+}
+
+.network-recovery-card {
+  width: min(86%, 28rem);
+  border: 1px solid rgba(248, 216, 120, 0.65);
+  border-radius: 16px;
+  background: rgba(5, 8, 20, 0.92);
+  box-shadow: 0 20px 70px rgba(0, 0, 0, 0.5);
+  padding: 1.25rem;
+}
+
+.network-recovery-card h2 {
+  margin: 0 0 0.5rem;
+  color: #f8d878;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.network-recovery-card p {
+  margin: 0;
+  color: #c9d1d9;
+}
+
 .menu-card {
   width: min(92%, 34rem);
   max-height: 95%;

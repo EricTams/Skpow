@@ -1,10 +1,20 @@
 import { describe, expect, it } from 'vitest';
 
-import { hashState } from '../sim/hash';
-import { runReplay } from '../sim/replay';
-import { createInitialState } from '../sim/state';
-import { InputBits, type FrameInputs } from '../sim/types';
-import { decodeGameplayPacket, encodeInputPacket, encodeSessionConfigPacket, encodeStateHashPacket, GameplayPacketType } from './protocol';
+import { InputBits, type ProjectileState } from '../sim/types';
+import type { ShipId } from '../sim/shipSpecs';
+import { fixed, fixedFromInt } from '../sim/fixed';
+import { angle } from '../sim/trig';
+import {
+  decodeGameplayPacket,
+  encodeDefenderHitPacket,
+  encodeInputPacket,
+  encodeOwnerWeaponEventPacket,
+  encodeProjectileSpawnPacket,
+  encodeRecoveryAckPacket,
+  encodeSessionConfigPacket,
+  encodeStateHashPacket,
+  GameplayPacketType,
+} from './protocol';
 import { NetworkMatchSession } from './matchSession';
 
 describe('network match session', () => {
@@ -15,7 +25,10 @@ describe('network match session', () => {
     expect(packets).toHaveLength(1);
     expect(decodeGameplayPacket(packets[0])).toEqual({
       type: GameplayPacketType.SessionConfig,
+      roundId: 0,
       seed: 123,
+      loadout: ['frog', 'cannonade'],
+      aiDemo: false,
       startFrame: 0,
       hostPlayerIndex: 0,
       joinerPlayerIndex: 1,
@@ -32,7 +45,7 @@ describe('network match session', () => {
     expect(result.state).toBeNull();
     expect(host.ready).toBe(false);
     expect(packets).toContain(GameplayPacketType.SessionConfig);
-    expect(packets).not.toContain(GameplayPacketType.Input);
+    expect(packets).not.toContain(GameplayPacketType.OwnerState);
   });
 
   it('uses session ready and ack packets before either peer is ready', () => {
@@ -40,23 +53,19 @@ describe('network match session', () => {
     const joiner = new NetworkMatchSession('joiner');
     const configPackets = host.takeOutgoingPackets();
 
-    expect(host.ready).toBe(false);
-    expect(joiner.ready).toBe(false);
-
     for (const packet of configPackets) {
       joiner.receiveGameplayMessage(packet);
     }
 
     const readyPackets = joiner.takeOutgoingPackets();
     expect(readyPackets.map((packet) => decodeGameplayPacket(packet).type)).toEqual([GameplayPacketType.SessionReady]);
-    expect(joiner.ready).toBe(false);
 
     for (const packet of readyPackets) {
       host.receiveGameplayMessage(packet);
     }
 
-    expect(host.ready).toBe(true);
     const ackPackets = host.takeOutgoingPackets();
+    expect(host.ready).toBe(true);
     expect(ackPackets.map((packet) => decodeGameplayPacket(packet).type)).toEqual([GameplayPacketType.SessionReadyAck]);
 
     for (const packet of ackPackets) {
@@ -67,139 +76,193 @@ describe('network match session', () => {
     expect(joiner.status.localPlayerIndex).toBe(1);
   });
 
-  it('routes remote input packets into rollback for the opposite player', () => {
+  it('starts both peers with the loadout from session config', () => {
+    const host = new NetworkMatchSession('host', { seed: 123, loadout: ['krab', 'pscout'], aiDemo: true });
+    const joiner = new NetworkMatchSession('joiner');
+    deliverPackets(joiner, host.takeOutgoingPackets());
+
+    expect(joiner.status.aiDemo).toBe(true);
+    expect(host.currentState?.ships.map((ship) => ship.shipId)).toEqual(['krab', 'pscout']);
+    expect(joiner.currentState?.ships.map((ship) => ship.shipId)).toEqual(['krab', 'pscout']);
+  });
+
+  it('lets the host start a new configured round over an existing joiner session', () => {
     const { joiner } = connectSessions({ seed: 123 });
-    joiner.receiveGameplayMessage(
-      encodeInputPacket({
-        frame: 0,
-        input: InputBits.TurnLeft,
-        previousInputs: [],
-      }),
-    );
+    const nextHost = new NetworkMatchSession('host', { roundId: 1, seed: 456, loadout: ['gooj', 'kron'] });
 
-    const result = joiner.step(InputBits.Thrust);
-    const canonical = runReplay(createInitialState(123), [[InputBits.TurnLeft, InputBits.Thrust]], hashState);
+    deliverPackets(joiner, nextHost.takeOutgoingPackets());
 
-    expect(result.state ? hashState(result.state) : null).toBe(hashState(canonical.finalState));
-    expect(result.status.lastRemoteInputFrame).toBe(0);
+    expect(joiner.ready).toBe(false);
+    expect(joiner.currentState?.frame).toBe(0);
+    expect(joiner.currentState?.ships.map((ship) => ship.shipId)).toEqual(['gooj', 'kron']);
+    expect(joiner.takeOutgoingPackets().map((packet) => decodeGameplayPacket(packet).type)).toEqual([GameplayPacketType.SessionReady]);
   });
 
-  it('records desyncs from typed state hash packets', () => {
-    const { host } = connectSessions({ hashInterval: 1 });
-    const result = host.step(0);
-
-    host.receiveGameplayMessage(encodeStateHashPacket({ frame: 1, hash: 0xffff }));
-
-    expect(result.status.lastLocalHashFrame).toBe(1);
-    expect(host.status.desync).toEqual({
-      frame: 1,
-      localHash: expect.any(Number),
-      remoteHash: 0xffff,
-    });
-  });
-
-  it('updates packet, input, hash, age, and rollback diagnostics', () => {
-    const { host, joiner } = connectSessions({ seed: 123, hashInterval: 1 });
-
-    const hostResult = host.step(InputBits.TurnLeft);
-    const hostPackets = hostResult.packets;
-    for (const packet of hostPackets) {
-      joiner.receiveGameplayMessage(packet);
+  it('ignores stale owner state from an older round', () => {
+    const { joiner } = connectSessions({ seed: 123, loadout: ['frog', 'cannonade'] });
+    const staleOwnerState = joiner.step(0).packets.find((packet) => decodeGameplayPacket(packet).type === GameplayPacketType.OwnerState);
+    expect(staleOwnerState).toBeDefined();
+    if (!staleOwnerState) {
+      return;
     }
 
-    expect(host.status.packetsSent).toBeGreaterThanOrEqual(3);
-    expect(host.status.lastInputFrame).toBe(0);
-    expect(host.status.lastHashFrame).toBe(1);
-    expect(host.status.lastLocalHashFrame).toBe(1);
-    expect(joiner.status.packetsReceived).toBeGreaterThanOrEqual(2);
-    expect(joiner.status.lastRemoteInputFrame).toBe(0);
-    expect(joiner.status.remoteInputAge).toBe(0);
+    const nextHost = new NetworkMatchSession('host', { roundId: 1, seed: 456, loadout: ['zizlik', 'frog'], readyImmediately: true });
+    expect(nextHost.currentState?.ships.map((ship) => ship.shipId)).toEqual(['zizlik', 'frog']);
 
-    const rollbackPeer = connectSessions({ seed: 123 });
-    rollbackPeer.joiner.step(0);
-    rollbackPeer.joiner.receiveGameplayMessage(
-      encodeInputPacket({
-        frame: 0,
-        input: InputBits.FirePrimary,
-        previousInputs: [],
-      }),
-    );
-    const rollbackResult = rollbackPeer.joiner.step(0);
-
-    expect(rollbackResult.status.rolledBack).toBe(true);
-    expect(rollbackResult.status.rollbackCount).toBe(1);
-    expect(rollbackResult.status.remoteInputAge).toBe(2);
+    nextHost.receiveGameplayMessage(staleOwnerState);
+    expect(nextHost.currentState?.ships.map((ship) => ship.shipId)).toEqual(['zizlik', 'frog']);
   });
 
-  it('stays deterministic through delayed, duplicated, and out-of-order gameplay packets', () => {
-    const harness = new NetworkHarness({ seed: 123, hashInterval: 4, rollbackLimit: 64 });
-    const inputs: readonly FrameInputs[] = [
-      [InputBits.Thrust, 0],
-      [InputBits.Thrust, InputBits.TurnLeft],
-      [0, InputBits.TurnLeft],
-      [InputBits.TurnRight, InputBits.Thrust],
-      [InputBits.TurnRight, InputBits.Thrust],
-      [0, 0],
-      [InputBits.TurnLeft, InputBits.TurnRight],
-      [InputBits.Thrust, InputBits.Thrust],
-      [0, InputBits.TurnLeft],
-      [InputBits.TurnRight, 0],
-      [InputBits.TurnLeft, 0],
-      [0, InputBits.TurnRight],
-    ];
+  it('steps local input immediately and emits owner facts instead of input packets', () => {
+    const { host } = connectSessions({ seed: 123 });
+    const result = host.step(InputBits.FirePrimary);
+    const packetTypes = result.packets.map((packet) => decodeGameplayPacket(packet).type);
 
-    for (const [hostInput, joinerInput] of inputs) {
-      harness.step(hostInput, joinerInput);
-    }
-
-    for (let i = 0; i < 4; i += 1) {
-      harness.step(0, 0);
-    }
-
-    harness.drain();
-
-    expect(harness.host.currentState?.frame).toBe(harness.joiner.currentState?.frame);
-    expect(harness.host.currentState ? hashState(harness.host.currentState) : null).toBe(
-      harness.joiner.currentState ? hashState(harness.joiner.currentState) : null,
-    );
-    expect(harness.host.status.protocolError).toBeNull();
-    expect(harness.joiner.status.protocolError).toBeNull();
-    expect(harness.host.status.lastRemoteInputFrame).toBeGreaterThanOrEqual(inputs.length - 2);
-    expect(harness.joiner.status.lastRemoteInputFrame).toBeGreaterThanOrEqual(inputs.length - 2);
+    expect(result.state?.ships[0].custom.frogCharge).toBe(1);
+    expect(result.status.frame).toBe(1);
+    expect(packetTypes).toContain(GameplayPacketType.OwnerState);
+    expect(packetTypes).toContain(GameplayPacketType.OwnerWeaponEvent);
+    expect(packetTypes).not.toContain(GameplayPacketType.Input);
+    expect(packetTypes).not.toContain(GameplayPacketType.StateHash);
+    expect(packetTypes).not.toContain(GameplayPacketType.StateCheckpoint);
   });
 
-  it('recovers a dropped input packet from the resend window', () => {
+  it('applies remote owner state fast-forwarded to the local frame', () => {
     const { host, joiner } = connectSessions({ seed: 123 });
-
-    host.step(InputBits.Thrust);
     joiner.step(0);
+    joiner.step(0);
+    const hostResult = host.step(InputBits.Thrust);
+    const ownerStatePacket = hostResult.packets.find((packet) => decodeGameplayPacket(packet).type === GameplayPacketType.OwnerState);
 
-    for (const packet of host.step(0).packets) {
-      joiner.receiveGameplayMessage(packet);
+    expect(ownerStatePacket).toBeDefined();
+    if (!ownerStatePacket) {
+      return;
     }
 
-    const result = joiner.step(0);
-    const canonical = runReplay(createInitialState(123), [[InputBits.Thrust, 0], [0, 0]], hashState);
+    joiner.receiveGameplayMessage(ownerStatePacket);
 
-    expect(result.state ? hashState(result.state) : null).toBe(hashState(canonical.finalState));
-    expect(joiner.status.lastRemoteInputFrame).toBe(1);
+    expect(joiner.status.lastOwnerStateFrame).toBe(1);
+    expect(joiner.currentState?.ships[0].x).not.toBe(host.currentState?.ships[0].x);
+    expect(joiner.currentState?.ships[0].vx).toBe(host.currentState?.ships[0].vx);
   });
 
-  it('records protocol and session errors for invalid or stale packets', () => {
+  it('applies remote projectile spawns idempotently and fast-forwards them', () => {
+    const { host, joiner } = connectSessions({ seed: 123 });
+    host.step(0);
+    host.step(0);
+    const joinerResult = joiner.step(InputBits.FirePrimary);
+    const spawnPacket = joinerResult.packets.find((packet) => decodeGameplayPacket(packet).type === GameplayPacketType.ProjectileSpawn);
+
+    expect(spawnPacket).toBeDefined();
+    if (!spawnPacket) {
+      return;
+    }
+
+    host.receiveGameplayMessage(spawnPacket);
+    host.receiveGameplayMessage(spawnPacket);
+
+    const spawned = host.currentState?.projectiles.filter((projectile) => projectile.ownerId === 1) ?? [];
+    const original = decodeGameplayPacket(spawnPacket);
+    expect(original.type).toBe(GameplayPacketType.ProjectileSpawn);
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0]?.id % 2).toBe(0);
+    expect(spawned[0]?.ttl).toBeLessThan(original.type === GameplayPacketType.ProjectileSpawn ? original.projectile.ttl : 999);
+  });
+
+  it('sends Frog charge start/update events and release before projectile spawn', () => {
+    const { host, joiner } = connectSessions({ seed: 123 });
+    const charging = host.step(InputBits.FirePrimary).packets.map((packet) => decodeGameplayPacket(packet));
+    const chargeEvent = charging.find((packet) => packet.type === GameplayPacketType.OwnerWeaponEvent);
+
+    expect(chargeEvent).toMatchObject({
+      type: GameplayPacketType.OwnerWeaponEvent,
+      ownerId: 0,
+      weapon: 'primary',
+      effectKind: 'frogChargeStart',
+      strength: 1,
+    });
+
+    const releasePackets = host.step(0).packets;
+    const releaseEvents = releasePackets.map((packet) => decodeGameplayPacket(packet));
+    expect(releaseEvents).toContainEqual(expect.objectContaining({ type: GameplayPacketType.OwnerWeaponEvent, effectKind: 'frogChargeRelease' }));
+    expect(releaseEvents).toContainEqual(expect.objectContaining({ type: GameplayPacketType.ProjectileSpawn }));
+
+    for (const packet of charging) {
+      if (packet.type === GameplayPacketType.OwnerWeaponEvent) {
+        joiner.receiveGameplayMessage(encodeOwnerWeaponEventPacket(packet));
+      }
+    }
+
+    expect(joiner.currentState?.ships[0].custom.frogCharge).toBe(1);
+  });
+
+  it('applies defender hit events idempotently', () => {
+    const { host, joiner } = connectSessions({ seed: 123 });
+    const projectile = buildProjectile({ id: 2, ownerId: 1 });
+    host.receiveGameplayMessage(encodeProjectileSpawnPacket({ roundId: 0, frame: 0, projectile }));
+    const hitPacket = encodeDefenderHitPacket({
+      roundId: 0,
+      hitId: `0:${projectile.id}`,
+      frame: host.currentState?.frame ?? 0,
+      defenderId: 0,
+      attackerId: 1,
+      projectileId: projectile.id,
+      damage: 2,
+      crew: 8,
+      alive: true,
+    });
+
+    joiner.receiveGameplayMessage(hitPacket);
+    joiner.receiveGameplayMessage(hitPacket);
+
+    expect(joiner.currentState?.ships[0].crew).toBe(8);
+    expect(joiner.currentState?.ships[0].alive).toBe(true);
+    expect(joiner.currentState?.projectiles.some((candidate) => candidate.id === projectile.id)).toBe(false);
+  });
+
+  it('lets the defender apply and confirm remote Kron beam hits', () => {
+    const { host, joiner } = connectSessions({ seed: 123, loadout: ['kron', 'frog'] });
+    const defender = joiner.currentState?.ships[1];
+    expect(defender).toBeDefined();
+    if (!defender) {
+      return;
+    }
+
+    joiner.receiveGameplayMessage(
+      encodeOwnerWeaponEventPacket({
+        roundId: 0,
+        eventId: '0:1:primary:kronBeam',
+        frame: joiner.currentState?.frame ?? 0,
+        ownerId: 0,
+        weapon: 'primary',
+        effectKind: 'kronBeam',
+        x: fixedFromInt(-450),
+        y: defender.y,
+        vx: fixed(0),
+        vy: fixed(0),
+        angle: angle(0),
+        durationFrames: 10,
+        strength: 1,
+      }),
+    );
+
+    expect(joiner.currentState?.ships[1].crew).toBe(defender.crew - 1);
+    const hitPacket = joiner.takeOutgoingPackets().find((packet) => decodeGameplayPacket(packet).type === GameplayPacketType.DefenderHit);
+    expect(hitPacket).toBeDefined();
+    if (!hitPacket) {
+      return;
+    }
+
+    host.receiveGameplayMessage(hitPacket);
+    expect(host.currentState?.ships[1].crew).toBe(defender.crew - 1);
+  });
+
+  it('records protocol and session errors for obsolete or invalid packets', () => {
     const joiner = new NetworkMatchSession('joiner');
 
     joiner.receiveGameplayMessage(new Uint8Array([99, GameplayPacketType.Input]));
     expect(joiner.status.protocolError).toContain('Unsupported gameplay protocol version');
     expect(joiner.status.packetsReceived).toBe(0);
-
-    joiner.receiveGameplayMessage(
-      encodeInputPacket({
-        frame: 0,
-        input: InputBits.TurnLeft,
-        previousInputs: [],
-      }),
-    );
-    expect(joiner.status.sessionError).toBe('Received input before the session was ready.');
 
     const connected = connectSessions({ seed: 123 });
     connected.joiner.receiveGameplayMessage(
@@ -209,18 +272,17 @@ describe('network match session', () => {
         previousInputs: [],
       }),
     );
-    connected.joiner.receiveGameplayMessage(
-      encodeInputPacket({
-        frame: 0,
-        input: InputBits.TurnLeft,
-        previousInputs: [],
-      }),
-    );
-    expect(connected.joiner.status.sessionError).toBe('Ignored stale input packet.');
+    expect(connected.joiner.status.sessionError).toBe('Received obsolete input packet.');
+
+    connected.host.receiveGameplayMessage(encodeStateHashPacket({ frame: 1, hash: 0xffff }));
+    expect(connected.host.status.sessionError).toBe('Received obsolete state hash packet.');
 
     connected.host.receiveGameplayMessage(
       encodeSessionConfigPacket({
+        roundId: 0,
         seed: 123,
+        loadout: ['frog', 'cannonade'],
+        aiDemo: false,
         startFrame: 0,
         hostPlayerIndex: 0,
         joinerPlayerIndex: 1,
@@ -228,9 +290,134 @@ describe('network match session', () => {
     );
     expect(connected.host.status.sessionError).toBe('Host received an unexpected session config packet.');
   });
+
+  it('pauses stepping and emits recovery packets when remote owner updates go stale', () => {
+    const { host, joiner } = connectSessions({ seed: 123 });
+    deliverPackets(joiner, host.step(0).packets);
+    deliverPackets(host, joiner.step(0).packets);
+
+    let result = host.step(InputBits.Thrust);
+    for (let frame = 0; frame < 32 && !result.status.paused; frame += 1) {
+      result = host.step(InputBits.Thrust);
+    }
+
+    const packetTypes = result.packets.map((packet) => decodeGameplayPacket(packet).type);
+    const pausedFrame = result.state?.frame;
+    const pausedAgain = host.step(InputBits.Thrust);
+
+    expect(result.status.paused).toBe(true);
+    expect(result.status.remoteOwnerAgeFrames).toBeGreaterThan(30);
+    expect(packetTypes).toContain(GameplayPacketType.RecoveryRequest);
+    expect(packetTypes).toContain(GameplayPacketType.RecoverySnapshot);
+    expect(packetTypes).not.toContain(GameplayPacketType.OwnerState);
+    expect(pausedAgain.state?.frame).toBe(pausedFrame);
+  });
+
+  it('reconciles snapshots by owner and resumes automatically after both peers ack', () => {
+    const { host, joiner } = connectSessions({ seed: 123 });
+    deliverPackets(joiner, host.step(InputBits.Thrust).packets);
+    deliverPackets(host, joiner.step(InputBits.TurnLeft).packets);
+
+    let recoveryPackets: readonly Uint8Array[] = [];
+    for (let frame = 0; frame < 34 && recoveryPackets.length === 0; frame += 1) {
+      const result = host.step(InputBits.Thrust);
+      if (result.status.paused) {
+        recoveryPackets = result.packets;
+      }
+    }
+
+    const hostShipX = host.currentState?.ships[0].x;
+    const joinerShipX = joiner.currentState?.ships[1].x;
+    deliverPackets(joiner, recoveryPackets);
+    expect(joiner.status.paused).toBe(true);
+
+    const joinerRecoveryPackets = joiner.takeOutgoingPackets();
+    deliverPackets(host, joinerRecoveryPackets);
+    expect(host.status.paused).toBe(false);
+    expect(host.currentState?.ships[0].x).toBe(hostShipX);
+    expect(host.currentState?.ships[1].x).toBe(joinerShipX);
+
+    deliverPackets(joiner, host.takeOutgoingPackets());
+    expect(joiner.status.paused).toBe(false);
+  });
+
+  it('keeps waiting for the current recovery ack before resuming', () => {
+    const { host, joiner } = connectSessions({ seed: 123 });
+    deliverPackets(joiner, host.step(0).packets);
+    deliverPackets(host, joiner.step(0).packets);
+
+    let recoveryPackets: readonly Uint8Array[] = [];
+    for (let frame = 0; frame < 34 && recoveryPackets.length === 0; frame += 1) {
+      const result = host.step(0);
+      if (result.status.paused) {
+        recoveryPackets = result.packets;
+      }
+    }
+
+    deliverPackets(joiner, recoveryPackets);
+    const snapshotOnly = joiner.takeOutgoingPackets().filter((packet) => decodeGameplayPacket(packet).type === GameplayPacketType.RecoverySnapshot);
+    deliverPackets(host, snapshotOnly);
+    expect(host.status.paused).toBe(true);
+
+    host.receiveGameplayMessage(encodeRecoveryAckPacket({ roundId: 0, recoveryId: 999, frame: host.currentState?.frame ?? 0, senderId: 1 }));
+    expect(host.status.paused).toBe(true);
+  });
+
+  it('keeps sending snapshots while reconciling so a peer can recover after a dropped snapshot', () => {
+    const { host, joiner } = connectSessions({ seed: 123 });
+    deliverPackets(joiner, host.step(0).packets);
+    deliverPackets(host, joiner.step(0).packets);
+
+    let recoveryPackets: readonly Uint8Array[] = [];
+    for (let frame = 0; frame < 34 && recoveryPackets.length === 0; frame += 1) {
+      const result = host.step(0);
+      if (result.status.paused) {
+        recoveryPackets = result.packets;
+      }
+    }
+
+    const requestOnly = recoveryPackets.filter((packet) => decodeGameplayPacket(packet).type === GameplayPacketType.RecoveryRequest);
+    deliverPackets(joiner, requestOnly);
+    deliverPackets(host, joiner.takeOutgoingPackets());
+    expect(host.status.recoveryWaitingForPeer).toBe(true);
+
+    const hostRecoveryRetry = host.step(0).packets;
+    const hostRecoveryRetryTypes = hostRecoveryRetry.map((packet) => decodeGameplayPacket(packet).type);
+    expect(hostRecoveryRetryTypes).toContain(GameplayPacketType.RecoverySnapshot);
+    expect(hostRecoveryRetryTypes).toContain(GameplayPacketType.RecoveryAck);
+
+    deliverPackets(joiner, hostRecoveryRetry);
+    expect(joiner.status.paused).toBe(false);
+    deliverPackets(host, joiner.takeOutgoingPackets());
+    expect(host.status.paused).toBe(false);
+
+    deliverPackets(joiner, recoveryPackets);
+    expect(joiner.status.paused).toBe(false);
+  });
+
+  it('stays packet-error-free through delayed duplicated owner facts', () => {
+    const harness = new NetworkHarness({ seed: 123 });
+    const inputs = [
+      [InputBits.Thrust, 0],
+      [InputBits.FirePrimary, InputBits.TurnLeft],
+      [0, InputBits.FirePrimary],
+      [InputBits.TurnRight, InputBits.Thrust],
+      [0, 0],
+    ] as const;
+
+    for (const [hostInput, joinerInput] of inputs) {
+      harness.step(hostInput, joinerInput);
+    }
+    harness.drain();
+
+    expect(harness.host.status.protocolError).toBeNull();
+    expect(harness.joiner.status.protocolError).toBeNull();
+    expect(harness.host.status.lastOwnerStateFrame).not.toBeNull();
+    expect(harness.joiner.status.lastOwnerStateFrame).not.toBeNull();
+  });
 });
 
-function connectSessions(options: { readonly seed?: number; readonly hashInterval?: number; readonly rollbackLimit?: number } = {}): {
+function connectSessions(options: { readonly seed?: number; readonly loadout?: readonly [ShipId, ShipId] } = {}): {
   readonly host: NetworkMatchSession;
   readonly joiner: NetworkMatchSession;
 } {
@@ -240,16 +427,20 @@ function connectSessions(options: { readonly seed?: number; readonly hashInterva
   for (const packet of host.takeOutgoingPackets()) {
     joiner.receiveGameplayMessage(packet);
   }
-
   for (const packet of joiner.takeOutgoingPackets()) {
     host.receiveGameplayMessage(packet);
   }
-
   for (const packet of host.takeOutgoingPackets()) {
     joiner.receiveGameplayMessage(packet);
   }
 
   return { host, joiner };
+}
+
+function deliverPackets(target: NetworkMatchSession, packets: readonly Uint8Array[]): void {
+  for (const packet of packets) {
+    target.receiveGameplayMessage(packet);
+  }
 }
 
 type QueuedPeer = 'host' | 'joiner';
@@ -268,7 +459,7 @@ class NetworkHarness {
   private sequence = 0;
   private tick = 0;
 
-  public constructor(options: { readonly seed?: number; readonly hashInterval?: number; readonly rollbackLimit?: number } = {}) {
+  public constructor(options: { readonly seed?: number; readonly loadout?: readonly [ShipId, ShipId] } = {}) {
     const sessions = connectSessions(options);
     this.host = sessions.host;
     this.joiner = sessions.joiner;
@@ -293,15 +484,9 @@ class NetworkHarness {
     for (const packet of packets) {
       const packetNumber = this.sequence;
       this.sequence += 1;
-
-      if (this.shouldDrop(packetNumber)) {
-        continue;
-      }
-
-      const deliverAt = this.tick + this.delayFor(packetNumber);
+      const deliverAt = this.tick + [1, 0, 1, 0, 1][packetNumber % 5];
       this.queue.push({ to, packet, deliverAt, sequence: packetNumber });
-
-      if (this.shouldDuplicate(packetNumber)) {
+      if (packetNumber % 6 === 2) {
         this.queue.push({ to, packet, deliverAt: deliverAt + 1, sequence: this.sequence });
         this.sequence += 1;
       }
@@ -322,16 +507,26 @@ class NetworkHarness {
       }
     }
   }
-
-  private delayFor(packetNumber: number): number {
-    return [1, 0, 1, 0, 1][packetNumber % 5];
-  }
-
-  private shouldDrop(packetNumber: number): boolean {
-    return packetNumber === -1;
-  }
-
-  private shouldDuplicate(packetNumber: number): boolean {
-    return packetNumber % 6 === 2;
-  }
 }
+
+function buildProjectile(overrides: Partial<ProjectileState> = {}): ProjectileState {
+  return {
+    id: 1,
+    ownerId: 0,
+    kind: 'frogBubble',
+    x: fixedFromInt(1000),
+    y: fixedFromInt(1000),
+    vx: fixed(0),
+    vy: fixed(0),
+    angle: angle(0),
+    ttl: 50,
+    damage: 1,
+    radius: fixedFromInt(20),
+    rotation: fixed(0),
+    trackPct: fixed(0),
+    variety: 0,
+    active: true,
+    ...overrides,
+  };
+}
+

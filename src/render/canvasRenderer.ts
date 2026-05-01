@@ -87,7 +87,7 @@ export class CanvasRenderer {
     }
 
     for (const ship of state.ships) {
-      this.drawShip(ship, camera);
+      this.drawShip(ship, state, camera);
     }
 
     this.drawBoardOverlays(state, camera);
@@ -221,7 +221,7 @@ export class CanvasRenderer {
     ctx.fill();
   }
 
-  private drawShip(ship: ShipState, camera: LegacyCamera): void {
+  private drawShip(ship: ShipState, state: GameState, camera: LegacyCamera): void {
     const x = this.toScreenX(fixedToNumber(ship.x), camera);
     const y = this.toScreenY(fixedToNumber(ship.y), camera);
     const angleRadians = (ship.angle / ANGLE_STEPS) * Math.PI * 2;
@@ -234,7 +234,7 @@ export class CanvasRenderer {
         this.drawFrogShip(ship, camera, x, y, angleRadians, spriteRadians);
         break;
       case 'cannonade':
-        this.drawCannonadeShip(ship, camera, x, y, spriteRadians);
+        this.drawCannonadeShip(ship, state, camera, x, y, spriteRadians);
         break;
       case 'zizlik':
         this.drawZizlikShip(camera, x, y, spriteRadians, ship.alive ? 1 : 0.35);
@@ -313,9 +313,12 @@ export class CanvasRenderer {
     }
   }
 
-  private drawCannonadeShip(ship: ShipState, camera: LegacyCamera, x: number, y: number, spriteRadians: number): void {
+  private drawCannonadeShip(ship: ShipState, state: GameState, camera: LegacyCamera, x: number, y: number, spriteRadians: number): void {
     const alpha = ship.alive ? 1 : 0.35;
-    const baseKey = ship.secondaryCooldown > 0 ? 'cannonadeSeparated' : 'cannonadeBase';
+    const secondaryActive =
+      ship.secondaryCooldown > 0 ||
+      state.projectiles.some((projectile) => projectile.active && projectile.ownerId === ship.id && projectile.kind === 'cannonadeBoomerang');
+    const baseKey = secondaryActive ? 'cannonadeSeparated' : 'cannonadeBase';
     const baseDrawn = this.drawSpriteAt(baseKey, x, y, spriteRadians, camera.scale * 0.15, alpha);
     const barrelKey = ship.battery >= 6 && ship.primaryCooldown === 0 ? 'cannonadeBarrel' : 'cannonadeBarrelCharging';
     const cannonRadians = this.toLegacySpriteRadians(((ship.custom.cannonAngle ?? ship.angle) / ANGLE_STEPS) * Math.PI * 2);

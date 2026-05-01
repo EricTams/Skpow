@@ -18,6 +18,8 @@ export class PeerConnectionSession {
   private state: ConnectionState = 'idle';
   private connected = false;
   private closed = false;
+  private settingRemoteDescription = false;
+  private remoteDescriptionApplied = false;
 
   public constructor(
     private readonly role: ConnectionRole,
@@ -103,8 +105,10 @@ export class PeerConnectionSession {
 
     this.cleanupCallbacks.push(
       this.lobbyRepository.observeLobby(this.lobbyId, (lobby) => {
-        if (lobby?.answer && !this.peer.currentRemoteDescription) {
-          void this.setRemoteDescription(lobby.answer);
+        if (lobby?.answer && this.canApplyRemoteDescription(lobby.answer)) {
+          void this.setRemoteDescription(lobby.answer).catch((error) => {
+            console.warn('Could not apply remote answer.', error);
+          });
         }
       }),
       this.lobbyRepository.observeJoinerCandidates(this.lobbyId, (candidate) => {
@@ -189,8 +193,38 @@ export class PeerConnectionSession {
   }
 
   private async setRemoteDescription(description: RTCSessionDescriptionInit): Promise<void> {
-    await this.peer.setRemoteDescription(description);
-    await this.flushPendingRemoteCandidates();
+    if (!this.canApplyRemoteDescription(description)) {
+      return;
+    }
+
+    this.settingRemoteDescription = true;
+    try {
+      await this.peer.setRemoteDescription(description);
+      this.remoteDescriptionApplied = true;
+    } finally {
+      this.settingRemoteDescription = false;
+    }
+    try {
+      await this.flushPendingRemoteCandidates();
+    } catch (error) {
+      console.warn('Could not flush pending ICE candidates.', error);
+    }
+  }
+
+  private canApplyRemoteDescription(description: RTCSessionDescriptionInit): boolean {
+    if (this.closed || this.settingRemoteDescription || this.remoteDescriptionApplied || this.peer.remoteDescription) {
+      return false;
+    }
+
+    if (description.type === 'answer') {
+      return this.peer.signalingState === 'have-local-offer';
+    }
+
+    if (description.type === 'offer') {
+      return this.peer.signalingState === 'stable';
+    }
+
+    return false;
   }
 
   private async addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {

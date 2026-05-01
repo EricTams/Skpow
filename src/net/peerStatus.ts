@@ -7,17 +7,15 @@ export function formatPeerStatus(peerConnectionState: ConnectionState, networkMa
   }
 
   const player = networkMatchStatus.localPlayerIndex + 1;
-  const remoteFrame = networkMatchStatus.lastRemoteInputFrame ?? 'none';
-  const localHash = networkMatchStatus.lastLocalHashFrame ?? 'none';
-  const remoteHash = networkMatchStatus.lastRemoteHashFrame ?? 'none';
-  const lastInput = networkMatchStatus.lastInputFrame ?? 'none';
-  const remoteInputAge = networkMatchStatus.remoteInputAge ?? 'n/a';
-  const lastHash = networkMatchStatus.lastHashFrame ?? 'none';
+  const ownerStateFrame = networkMatchStatus.lastOwnerStateFrame ?? 'none';
+  const projectileFrame = networkMatchStatus.lastProjectileSpawnFrame ?? 'none';
+  const weaponFrame = networkMatchStatus.lastWeaponEventFrame ?? 'none';
+  const hitFrame = networkMatchStatus.lastDefenderHitFrame ?? 'none';
+  const recoveryStatus = networkMatchStatus.paused
+    ? `recovery paused: ${networkMatchStatus.recoveryId ?? 'none'} (${formatRecoveryWait(networkMatchStatus)})`
+    : 'recovery running';
+  const remoteOwnerAge = networkMatchStatus.remoteOwnerAgeFrames ?? 'unknown';
   const readyStatus = networkMatchStatus.ready ? 'ready' : waitingStatus(networkMatchStatus.role);
-  const rollbackStatus = networkMatchStatus.rolledBack ? 'rollback replayed' : 'no rollback';
-  const syncStatus = networkMatchStatus.desync
-    ? `desync at frame ${networkMatchStatus.desync.frame}`
-    : `hash ok local:${localHash} remote:${remoteHash}`;
   const protocolStatus = networkMatchStatus.protocolError
     ? `protocol error: ${networkMatchStatus.protocolError}`
     : 'protocol ok';
@@ -28,13 +26,12 @@ export function formatPeerStatus(peerConnectionState: ConnectionState, networkMa
     `${networkMatchStatus.role} player ${player}`,
     readyStatus,
     `packets sent/received: ${networkMatchStatus.packetsSent}/${networkMatchStatus.packetsReceived}`,
-    `last input frame: ${lastInput}`,
-    `last remote input: ${remoteFrame}`,
-    `remote input age: ${remoteInputAge}`,
-    `last hash frame: ${lastHash}`,
-    `rollback count: ${networkMatchStatus.rollbackCount}`,
-    rollbackStatus,
-    syncStatus,
+    `last owner state: ${ownerStateFrame}`,
+    `last projectile spawn: ${projectileFrame}`,
+    `last weapon event: ${weaponFrame}`,
+    `last defender hit: ${hitFrame}`,
+    `remote owner age: ${remoteOwnerAge}`,
+    recoveryStatus,
     protocolStatus,
     sessionStatus,
   ].join(' | ');
@@ -42,4 +39,11 @@ export function formatPeerStatus(peerConnectionState: ConnectionState, networkMa
 
 function waitingStatus(role: NetworkMatchStatus['role']): string {
   return role === 'host' ? 'waiting for joiner ready' : 'waiting for host ack';
+}
+
+function formatRecoveryWait(status: NetworkMatchStatus): string {
+  if (status.recoveryWaitingForPeer) {
+    return 'waiting for peer resync';
+  }
+  return status.recoveryReason ?? 'unknown';
 }

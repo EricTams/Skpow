@@ -89,14 +89,15 @@ export function stepGame(state: GameState, inputs: FrameInputs): GameState {
   const ships = state.ships.map((ship, index) => {
     const result = stepShip(ship, inputs[index] ?? 0, state, rngSeed, nextProjectileId, nextActorId);
     spawnedActors.push(...result.actors);
-    spawned.push(...result.projectiles);
+    const ownerProjectiles = assignOwnerProjectileIds(result.projectiles, ship.id, nextProjectileId);
+    spawned.push(...ownerProjectiles.projectiles);
     damageEffects.push(...result.damageEffects);
     freezeEffects.push(...result.freezeEffects);
     if (result.clearEnemyBeacons !== undefined) {
       clearBeaconsFor.add(result.clearEnemyBeacons);
     }
     rngSeed = result.rngSeed;
-    nextProjectileId = result.nextProjectileId;
+    nextProjectileId = ownerProjectiles.nextProjectileId;
     nextActorId = result.nextActorId;
     return result.ship;
   });
@@ -648,6 +649,26 @@ function createProjectile(
   };
 }
 
+function assignOwnerProjectileIds(
+  projectiles: readonly ProjectileState[],
+  ownerId: number,
+  nextProjectileId: number,
+): { readonly projectiles: readonly ProjectileState[]; readonly nextProjectileId: number } {
+  let nextId = nextProjectileIdForOwner(nextProjectileId, ownerId);
+  const assigned = projectiles.map((projectile) => {
+    const next = { ...projectile, id: nextId };
+    nextId += 2;
+    return next;
+  });
+
+  return { projectiles: assigned, nextProjectileId: Math.max(nextProjectileId, nextId - 1) };
+}
+
+function nextProjectileIdForOwner(nextProjectileId: number, ownerId: number): number {
+  const ownerParity = ownerId === 0 ? 1 : 0;
+  return nextProjectileId % 2 === ownerParity ? nextProjectileId : nextProjectileId + 1;
+}
+
 function isShipCollidingWithPlanet(x: Fixed, y: Fixed, state: GameState, spec: ShipSpec): boolean {
   return isInsidePlanet(x, y, fixedAdd(state.planet.radius, spec.radius), state);
 }
@@ -1143,7 +1164,7 @@ function steerProjectile(projectile: ProjectileState, state: GameState, rngSeed:
   };
 }
 
-function isKronBeamHitting(x: Fixed, y: Fixed, facing: Angle, enemy: ShipState, state: GameState): boolean {
+export function isKronBeamHitting(x: Fixed, y: Fixed, facing: Angle, enemy: ShipState, state: GameState): boolean {
   const enemyRadius = getShipSpec(enemy.shipId).radius;
   for (let index = 0; index < KRON_SCAN_STEPS; index += 1) {
     const distance = fixedMul(KRON_SCAN_SPACING, fixedFromInt(index));
