@@ -1,0 +1,18 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+*.log
+
+# Local environment files. Keep the checked-in template.
+.env*
+!.env.example
+
+# OS/editor noise.
+.DS_Store
+Thumbs.db
+
+# Local reference source, not intended for GitHub.
+reference_code/
+reference_art/
+art_unused/

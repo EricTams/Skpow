@@ -1,0 +1,34 @@
+{
+  "rules": {
+    "lobbies": {
+      ".read": "auth != null",
+      "$lobbyId": {
+        ".write": "auth != null && ((!data.exists() && newData.exists() && newData.child('hostUid').val() === auth.uid && newData.child('status').val() === 'open' && !newData.child('joinerUid').exists()) || (data.exists() && !newData.exists() && data.child('hostUid').val() === auth.uid) || (data.exists() && newData.exists() && data.child('status').val() === 'open' && !data.child('joinerUid').exists() && newData.child('hostUid').val() === data.child('hostUid').val() && newData.child('joinerUid').val() === auth.uid && newData.child('status').val() === 'connecting'))",
+        "hostUid": {
+          ".validate": "newData.isString() && ((!data.exists() && newData.val() === auth.uid) || (data.exists() && newData.val() === data.val()))"
+        },
+        "joinerUid": {
+          ".validate": "newData.isString()"
+        },
+        "status": {
+          ".validate": "newData.val() === 'open' || newData.val() === 'connecting'"
+        },
+        "settings": {
+          ".validate": "newData.hasChildren(['pointTotal', 'draftMode'])"
+        },
+        "offer": {
+          ".write": "auth != null && data.parent().child('hostUid').val() === auth.uid"
+        },
+        "answer": {
+          ".write": "auth != null && data.parent().child('joinerUid').val() === auth.uid"
+        },
+        "hostCandidates": {
+          ".write": "auth != null && data.parent().child('hostUid').val() === auth.uid"
+        },
+        "joinerCandidates": {
+          ".write": "auth != null && data.parent().child('joinerUid').val() === auth.uid"
+        }
+      }
+    }
+  }
+}

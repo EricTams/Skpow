@@ -1,0 +1,15 @@
+---
+description: Ship rendering should mirror reference Draw methods
+globs: src/render/**/*.ts,src/ships.ts
+alwaysApply: false
+---
+
+# Ship Rendering
+
+Most in-match ship rendering should be explicit per ship, not forced through the small render metadata path.
+
+- Prefer dispatching by `ship.shipId` in `canvasRenderer.ts` and implementing focused functions such as `drawFrogShip`, `drawKronShip`, `drawZizlikShip`, and `drawCannonadeShip`.
+- Use `reference_code/<Ship>.cpp::Draw` as the source of truth for layer order, rotation, scale, special states, attachments, and effects.
+- Keep shared helpers for low-level concerns like coordinate conversion, alpha, sprite drawing, and angle conversion.
+- Keep `src/ships.ts` metadata useful for menus, HUD assets, projectile assets, stats, and generic unfinished ships, but do not treat it as authoritative for legacy in-match ship drawing.
+- A generic renderer is fine only for ships that are genuinely simple or not yet audited against the reference.
