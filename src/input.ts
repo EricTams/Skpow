@@ -92,6 +92,10 @@ export function readLocalInputs(): FrameInputs {
   ];
 }
 
+export function readPrimaryLocalInput(): number {
+  return readKeyboardInput(PLAYER_ONE_KEYS) | readGamepadInput(0);
+}
+
 export function readInputDeviceStatus(): InputDeviceStatus {
   return {
     keyboardActive: keys.size > 0,

@@ -1,6 +1,6 @@
 import './style.css';
 
-import { bindKeyboard, readInputDeviceStatus, readLocalInputs } from './input';
+import { bindKeyboard, readInputDeviceStatus, readLocalInputs, readPrimaryLocalInput } from './input';
 import { createFixedLoop, SIM_FPS } from './loop';
 import { getFirebaseClient, isFirebaseConfigured, observeAnonymousUser, signInWithAnonymousAuth } from './net/firebase';
 import { LobbyRepository, type LobbyRecord } from './net/lobby';
@@ -187,9 +187,7 @@ createFixedLoop(
     }
 
     if (appPhase.name === 'networkFight' && networkMatch && peerConnectionState === 'connected') {
-      const inputs = readLocalInputs();
-      const localInput = inputs[networkMatch.status.localPlayerIndex];
-      const result = networkMatch.step(localInput);
+      const result = networkMatch.step(readPrimaryLocalInput());
       networkMatchStatus = result.status;
       sendGameplayPackets(result.packets);
       updatePeerStatus();
