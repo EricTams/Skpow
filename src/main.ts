@@ -72,6 +72,7 @@ type AppPhase =
   | { readonly name: 'hostSetup' }
   | { readonly name: 'lobbyBrowser' }
   | { readonly name: 'networkConnecting'; readonly role: ConnectionRole; readonly budget: number; readonly lobbyId: string }
+  | { readonly name: 'networkFleetBuild'; readonly role: ConnectionRole; readonly budget: number; readonly lobbyId: string; readonly fleet: readonly FleetShip[] }
   | { readonly name: 'networkFight'; readonly handledWinnerId: number | null }
   | { readonly name: 'networkResult'; readonly winnerId: number };
 
@@ -87,6 +88,8 @@ let peerConnectionState: ConnectionState = 'idle';
 let networkMatch: NetworkMatchSession | null = null;
 let networkMatchStatus: NetworkMatchStatus | null = null;
 let networkAiRound = 0;
+let pendingHostShip: ShipCatalogId | null = null;
+let pendingJoinerShip: ShipCatalogId | null = null;
 let lastInputStatusText = '';
 let lastInputDebugText = '';
 let inputStatusRenderTick = 0;
@@ -642,7 +645,11 @@ function handleMenuAction(button: HTMLButtonElement): void {
       removeShipFromPlayerFleet(readFleetUid(button));
       return;
     case 'fleet-ready':
-      startSinglePlayerRun();
+      if (appPhase.name === 'networkFleetBuild') {
+        readyNetworkFleet();
+      } else {
+        startSinglePlayerRun();
+      }
       return;
     case 'ship-pick':
       choosePlayerShip(readFleetUid(button));
@@ -717,6 +724,9 @@ function renderMenu(): void {
     case 'networkConnecting':
       menuOverlay.innerHTML = renderNetworkConnectingMenu(appPhase);
       break;
+    case 'networkFleetBuild':
+      menuOverlay.innerHTML = renderFleetBuildMenu(appPhase);
+      break;
     case 'networkResult':
       menuOverlay.innerHTML = renderFinalResultMenu(`Player ${appPhase.winnerId + 1} wins`, 'The online duel is complete.');
       break;
@@ -783,14 +793,15 @@ function renderBudgetMenu(title: string, action: string, detail: string): string
   `;
 }
 
-function renderFleetBuildMenu(phase: Extract<AppPhase, { readonly name: 'fleetBuild' }>): string {
+function renderFleetBuildMenu(phase: Extract<AppPhase, { readonly name: 'fleetBuild' | 'networkFleetBuild' }>): string {
   const remaining = getRemainingBudget(phase.fleet, phase.budget);
+  const isNetwork = phase.name === 'networkFleetBuild';
   return `
     <section class="menu-card menu-card-wide">
       ${renderMenuBrand()}
-      <p class="menu-kicker">Single Player</p>
+      <p class="menu-kicker">${isNetwork ? 'Multiplayer' : 'Single Player'}</p>
       <h2>Build Your Fleet</h2>
-      <p>${remaining} / ${phase.budget} points remaining. Costs are placeholders for now.</p>
+      <p>${remaining} / ${phase.budget} points remaining. ${isNetwork ? 'Your first ship will enter the online fight when both players are ready.' : 'Costs are placeholders for now.'}</p>
       <div class="ship-card-grid">
         ${SHIP_CATALOG.map((ship) => renderCatalogCard(ship.id, remaining)).join('')}
       </div>
@@ -888,7 +899,7 @@ function renderMultiplayerMenu(): string {
       ${renderMenuBrand()}
       <p class="menu-kicker">Multiplayer</p>
       <h2>Find A Fight</h2>
-      <p>Create a lobby with a point budget or join a hosted lobby.</p>
+      <p>Create a lobby with a point budget or join a hosted lobby. Fleets are built after the peer connection is ready.</p>
       <div class="menu-actions">
         ${currentUid ? '' : '<button type="button" data-action="sign-in">Sign In Anonymously</button>'}
         <button type="button" data-action="multi-host">Create Hosted Lobby</button>
@@ -907,7 +918,7 @@ function renderLobbyBrowserMenu(): string {
       ${renderMenuBrand()}
       <p class="menu-kicker">Hosted Lobbies</p>
       <h2>Join Multiplayer</h2>
-      <p>${authText}</p>
+      <p>${authText} You will build your fleet after connecting.</p>
       <div class="lobby-list menu-lobby-list">
         ${visibleLobbies.length === 0 ? '<p>No open lobbies yet.</p>' : visibleLobbies.map(renderMenuLobbyRow).join('')}
       </div>
@@ -950,7 +961,7 @@ function renderMenuBrand(): string {
 }
 
 function addShipToPlayerFleet(shipId: ShipCatalogId): void {
-  if (appPhase.name !== 'fleetBuild') {
+  if (appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') {
     return;
   }
 
@@ -968,7 +979,7 @@ function addShipToPlayerFleet(shipId: ShipCatalogId): void {
 }
 
 function removeShipFromPlayerFleet(uid: string): void {
-  if (appPhase.name !== 'fleetBuild') {
+  if (appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') {
     return;
   }
 
@@ -999,6 +1010,38 @@ function startSinglePlayerRun(): void {
   };
   appPhase = { name: 'shipSelect', session, message: 'Pick the first ship for your fleet.' };
   renderMenu();
+}
+
+function readyNetworkFleet(): void {
+  if (appPhase.name !== 'networkFleetBuild' || appPhase.fleet.length === 0) {
+    return;
+  }
+
+  const selectedShip = appPhase.fleet[0].catalogId;
+  const selectedName = getShipCatalogEntry(selectedShip).name;
+  const { role, budget, lobbyId } = appPhase;
+
+  if (role === 'joiner') {
+    currentLoadout = [DEFAULT_MATCH_SHIPS[0], selectedShip];
+    renderer.setShipLoadout(currentLoadout);
+    renderHud(currentLoadout);
+    networkMatch = new NetworkMatchSession('joiner', { readyImmediately: true });
+    networkMatchStatus = networkMatch.status;
+    presentationCorrection = null;
+    if (!peerSession?.sendControlMessage(`selectedShip:${selectedShip}`)) {
+      log('Could not send selected ship to host yet.');
+    }
+    log(`Ready with ${selectedName}. Waiting for host config...`);
+    appPhase = { name: 'networkConnecting', role, budget, lobbyId };
+    renderMenu();
+    return;
+  }
+
+  pendingHostShip = selectedShip;
+  log(`Ready with ${selectedName}. Waiting for joiner...`);
+  appPhase = { name: 'networkConnecting', role, budget, lobbyId };
+  renderMenu();
+  startNetworkMatchWhenReady(role, budget, lobbyId);
 }
 
 function choosePlayerShip(uid: string): void {
@@ -1197,6 +1240,8 @@ async function createHostLobby(uid: string, repository: LobbyRepository, budget:
   peerSession?.close();
   networkMatch = null;
   networkMatchStatus = null;
+  pendingHostShip = null;
+  pendingJoinerShip = null;
   peerSession = createPeerSession('host', lobbyId, repository, budget);
   appPhase = { name: 'networkConnecting', role: 'host', budget, lobbyId };
   renderMenu();
@@ -1232,31 +1277,13 @@ function createPeerSession(
     onStateChange: (connectionState: ConnectionState) => {
       peerConnectionState = connectionState;
       if (connectionState === 'connected' && !networkMatch) {
-        log(`Network match using ${budget} point lobby budget.`);
-        networkAiRound = 0;
-        currentLoadout = role === 'host' && networkDebugSettings.aiHost ? chooseRandomNetworkAiLoadout() : DEFAULT_MATCH_SHIPS;
-        const seed = Date.now() >>> 0;
-        renderer.setShipLoadout(currentLoadout);
-        renderHud(currentLoadout);
-        state = createInitialState(seed, currentLoadout);
-        networkMatch = new NetworkMatchSession(role, {
-          roundId: networkAiRound,
-          seed,
-          loadout: currentLoadout,
-          aiDemo: role === 'host' && networkDebugSettings.aiHost,
-          readyImmediately: true,
-        });
-        presentationCorrection = null;
-        sendGameplayPackets(networkMatch.takeOutgoingPackets());
-        networkMatchStatus = networkMatch.status;
-        appPhase = { name: 'networkFight', handledWinnerId: null };
-        log(`Network debug: ${formatNetworkDebugSettings(role)}`);
+        startNetworkMatchWhenReady(role, budget, lobbyId);
       }
 
       if (connectionState === 'closed' || connectionState === 'failed') {
         networkMatch = null;
         networkMatchStatus = null;
-        if (appPhase.name === 'networkFight' || appPhase.name === 'networkConnecting') {
+        if (appPhase.name === 'networkFight' || appPhase.name === 'networkConnecting' || appPhase.name === 'networkFleetBuild') {
           appPhase = { name: 'multiplayerMenu' };
         }
       }
@@ -1265,7 +1292,9 @@ function createPeerSession(
       renderMenu();
       log(`Peer state changed to ${connectionState}.`);
     },
-    onControlMessage: (message) => log(`Control message: ${message}`),
+    onControlMessage: (message) => {
+      handleNetworkControlMessage(role, budget, lobbyId, message);
+    },
     onGameplayMessage: (message) => {
       if (!networkMatch) {
         log('Received gameplay packet before match session was ready.');
@@ -1283,7 +1312,7 @@ function createPeerSession(
         sendGameplayPackets(networkMatch.takeOutgoingPackets());
         networkMatchStatus = networkMatch.status;
         syncNetworkLoadoutFromMatch();
-        if (isSessionConfig && networkMatchStatus.aiDemo) {
+        if (isSessionConfig) {
           appPhase = { name: 'networkFight', handledWinnerId: null };
           renderMenu();
         }
@@ -1295,6 +1324,73 @@ function createPeerSession(
   });
 }
 
+function startNetworkMatchWhenReady(role: ConnectionRole, budget: number, lobbyId: string): void {
+  if (networkMatch) {
+    return;
+  }
+
+  if (role === 'joiner') {
+    if (appPhase.name !== 'networkFleetBuild') {
+      appPhase = { name: 'networkFleetBuild', role, budget, lobbyId, fleet: [] };
+      renderMenu();
+    }
+    log(`Network match using ${budget} point lobby budget. Build your fleet, then ready up.`);
+    return;
+  }
+
+  const aiHost = networkDebugSettings.aiHost;
+  if (!aiHost && !pendingHostShip) {
+    if (appPhase.name !== 'networkFleetBuild') {
+      appPhase = { name: 'networkFleetBuild', role, budget, lobbyId, fleet: [] };
+      renderMenu();
+    }
+    log(`Network match using ${budget} point lobby budget. Build your fleet, then wait for both players to ready up.`);
+    return;
+  }
+
+  if (!aiHost && !pendingJoinerShip) {
+    log(`Network match using ${budget} point lobby budget. Waiting for joiner's fleet...`);
+    return;
+  }
+
+  log(`Network match using ${budget} point lobby budget.`);
+  networkAiRound = 0;
+  currentLoadout = aiHost ? chooseRandomNetworkAiLoadout() : [pendingHostShip ?? DEFAULT_MATCH_SHIPS[0], pendingJoinerShip ?? DEFAULT_MATCH_SHIPS[1]];
+  const seed = Date.now() >>> 0;
+  renderer.setShipLoadout(currentLoadout);
+  renderHud(currentLoadout);
+  state = createInitialState(seed, currentLoadout);
+  networkMatch = new NetworkMatchSession('host', {
+    roundId: networkAiRound,
+    seed,
+    loadout: currentLoadout,
+    aiDemo: aiHost,
+    readyImmediately: true,
+  });
+  presentationCorrection = null;
+  sendGameplayPackets(networkMatch.takeOutgoingPackets());
+  networkMatchStatus = networkMatch.status;
+  appPhase = { name: 'networkFight', handledWinnerId: null };
+  renderMenu();
+  log(`Network debug: ${formatNetworkDebugSettings(role)}`);
+  log(`Network loadout: ${getShipCatalogEntry(currentLoadout[0]).name} vs ${getShipCatalogEntry(currentLoadout[1]).name}`);
+}
+
+function handleNetworkControlMessage(role: ConnectionRole, budget: number, lobbyId: string, message: string): void {
+  const selectedShipPrefix = 'selectedShip:';
+  if (role === 'host' && message.startsWith(selectedShipPrefix)) {
+    const shipId = message.slice(selectedShipPrefix.length);
+    if (isShipCatalogId(shipId)) {
+      pendingJoinerShip = shipId;
+      log(`Joiner selected ${getShipCatalogEntry(shipId).name}.`);
+      startNetworkMatchWhenReady(role, budget, lobbyId);
+      return;
+    }
+  }
+
+  log(`Control message: ${message}`);
+}
+
 function closePeer(): void {
   clearPendingGameplayPackets();
   presentationCorrection = null;
@@ -1302,6 +1398,8 @@ function closePeer(): void {
   peerSession = null;
   networkMatch = null;
   networkMatchStatus = null;
+  pendingHostShip = null;
+  pendingJoinerShip = null;
   peerConnectionState = 'closed';
   updatePeerStatus();
 }
@@ -1495,6 +1593,7 @@ function formatPhaseStatus(): string {
     case 'hostSetup':
     case 'lobbyBrowser':
     case 'networkConnecting':
+    case 'networkFleetBuild':
       return 'Multiplayer setup';
     case 'fighting':
     case 'aiDemo':
@@ -1751,11 +1850,15 @@ function clampBudget(value: number): number {
 
 function readShipId(button: HTMLButtonElement): ShipCatalogId {
   const shipId = button.dataset.shipId;
-  if (!SHIP_CATALOG.some((ship) => ship.id === shipId)) {
+  if (!isShipCatalogId(shipId)) {
     throw new Error(`Invalid ship id: ${shipId}`);
   }
 
-  return shipId as ShipCatalogId;
+  return shipId;
+}
+
+function isShipCatalogId(shipId: string | undefined): shipId is ShipCatalogId {
+  return SHIP_CATALOG.some((ship) => ship.id === shipId);
 }
 
 function readFleetUid(button: HTMLButtonElement): string {
