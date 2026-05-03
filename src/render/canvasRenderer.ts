@@ -2,7 +2,7 @@ import { fixedToNumber } from '../sim/fixed';
 import { DEFAULT_MATCH_SHIPS, getShipCatalogEntry, type ShipCatalogId } from '../ships';
 import type { AiMovementMode } from '../sim/ai';
 import { ANGLE_STEPS } from '../sim/trig';
-import type { ActorState, GameState, ProjectileState, ShipState } from '../sim/types';
+import type { ActorState, EffectState, GameState, ProjectileState, ShipState } from '../sim/types';
 import type { LegacyAssetKey, LegacyImageStore } from './legacyAssets';
 
 const SHIP_COLORS = ['#58a6ff', '#ff7b72'];
@@ -14,9 +14,20 @@ const MIN_CAMERA_OFFSET = 0.2 * LEGACY_ARENA_RADIUS;
 const PSCOUT_RENDER_BEAM_FRAMES = 200;
 const VOSKUM_TELEPORT_VISUAL_FRAMES = 24;
 const VOSKUM_TELEPORT_IMPRINT_COLOR = '#66ff66';
-const STAR_KEYS = ['star1', 'star2'] as const satisfies readonly LegacyAssetKey[];
+const SHIP_EXPLOSION_FRAME_COUNT = 40;
+const SHIP_EXPLOSION_LIFE_AT_FIRST_FRAME = 80;
+const SHIP_EXPLOSION_RENDER_SCALE = 1.0;
+const THRUST_DUST_COLOR = 'rgb(255, 144, 64)';
+const THRUST_DUST_BASE_RADIUS = 12;
 const GOOJ_JUNK_KEYS = ['goojJunk', 'goojJunk2', 'goojJunk3', 'goojJunk4', 'goojJunk5', 'goojJunk6', 'goojJunk7'] as const satisfies readonly LegacyAssetKey[];
-const STAR_FIELD = createStarField(500);
+const DUST_MIN_PARALLAX = 0.35;
+const DUST_MAX_PARALLAX = 1.0;
+const DUST_MIN_SIZE = 0.8;
+const DUST_MAX_SIZE = 3.4;
+const DUST_MIN_GRAY = 48;
+const DUST_MAX_GRAY = 150;
+const DUST_DEPTH_BIAS = 0.6;
+const DUST_FIELD = createDustField(750, 0x71a3f0d);
 type MatchShipLoadout = readonly [ShipCatalogId, ShipCatalogId];
 type AiDebugModes = readonly (AiMovementMode | null)[];
 
@@ -26,22 +37,29 @@ interface LegacyCamera {
   readonly screenScale: number;
   readonly centerX: number;
   readonly centerY: number;
+  readonly driftX: number;
+  readonly driftY: number;
   readonly screenCenterX: number;
   readonly screenCenterY: number;
 }
 
-interface StarPlacement {
-  readonly key: 'star1' | 'star2';
+interface DustParticle {
   readonly x: number;
   readonly y: number;
   readonly depth: number;
-  readonly alpha: number;
+  readonly parallax: number;
+  readonly size: number;
+  readonly color: string;
 }
 
 export class CanvasRenderer {
   private readonly context: CanvasRenderingContext2D;
   private shipLoadout: MatchShipLoadout = DEFAULT_MATCH_SHIPS;
   private aiDebugModes: AiDebugModes = [];
+  private lastCameraCenterX: number | null = null;
+  private lastCameraCenterY: number | null = null;
+  private cameraDriftX = 0;
+  private cameraDriftY = 0;
 
   public constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -86,13 +104,27 @@ export class CanvasRenderer {
       this.drawActor(actor, camera);
     }
 
+    // Thrust dust trails draw beneath ships (legacy DrawPre).
+    for (const effect of state.effects) {
+      if (effect.kind === 'thrustDust') {
+        this.drawEffect(effect, camera);
+      }
+    }
+
     for (const ship of state.ships) {
       this.drawShip(ship, state, camera);
     }
 
+    // Explosion blooms draw above ships (legacy DrawPost).
+    for (const effect of state.effects) {
+      if (effect.kind === 'shipExplosion') {
+        this.drawEffect(effect, camera);
+      }
+    }
+
     this.drawBoardOverlays(state, camera);
 
-    if (state.winnerId !== null) {
+    if (state.winnerId !== null && !hasActiveShipExplosion(state)) {
       this.drawWinnerBanner(state.winnerId);
     }
   }
@@ -120,12 +152,16 @@ export class CanvasRenderer {
     let centerX = this.wrapSignedLegacyCoordinate(player2X + diffX / 2);
     let centerY = this.wrapSignedLegacyCoordinate(player2Y + diffY / 2);
 
-    if (!player1.alive && player2.alive) {
+    // While a death explosion is still playing, keep framing the dying ship's
+    // last position so the camera doesn't snap to the survivor mid-blast.
+    const explosionActive = hasActiveShipExplosion(state);
+
+    if (!player1.alive && player2.alive && !explosionActive) {
       centerX = player2X;
       centerY = player2Y;
       diffX = 0;
       diffY = 0;
-    } else if (player1.alive && !player2.alive) {
+    } else if (player1.alive && !player2.alive && !explosionActive) {
       centerX = player1X;
       centerY = player1Y;
       diffX = 0;
@@ -136,12 +172,24 @@ export class CanvasRenderer {
     const ratio = offset / LEGACY_ARENA_RADIUS;
     const legacyScale = (480 / offset) * 0.75 * (ratio + 1);
 
+    if (this.lastCameraCenterX === null || this.lastCameraCenterY === null) {
+      this.cameraDriftX = centerX;
+      this.cameraDriftY = centerY;
+    } else {
+      this.cameraDriftX += this.shortestWrappedDelta(centerX - this.lastCameraCenterX);
+      this.cameraDriftY += this.shortestWrappedDelta(centerY - this.lastCameraCenterY);
+    }
+    this.lastCameraCenterX = centerX;
+    this.lastCameraCenterY = centerY;
+
     return {
       scale: legacyScale * screenScale,
       legacyScale,
       screenScale,
       centerX,
       centerY,
+      driftX: this.cameraDriftX,
+      driftY: this.cameraDriftY,
       screenCenterX: this.canvas.width / 2,
       screenCenterY: this.canvas.height / 2,
     };
@@ -170,31 +218,21 @@ export class CanvasRenderer {
       ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
     }
 
-    this.drawStars(camera);
+    this.drawDust(camera, DUST_FIELD);
     ctx.restore();
   }
 
-  private drawStars(camera: LegacyCamera): void {
+  private drawDust(camera: LegacyCamera, field: readonly DustParticle[]): void {
     const ctx = this.context;
-
     ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    for (const star of STAR_FIELD) {
-      const x = camera.screenCenterX - (star.x - LEGACY_ARENA_RADIUS / 2) * camera.scale;
-      const y = camera.screenCenterY - (star.y - LEGACY_ARENA_RADIUS / 2) * camera.scale;
-      const scale = 1.5 * camera.scale * star.depth;
-      const image = this.images.getLoaded(star.key);
-
-      ctx.globalAlpha = star.alpha;
-      if (image) {
-        const width = image.naturalWidth * scale;
-        const height = image.naturalHeight * scale;
-        ctx.drawImage(image, x - width / 2, y - height / 2, width, height);
-      } else {
-        const size = Math.max(1, 2 * scale);
-        ctx.fillStyle = '#bfc8ff';
-        ctx.fillRect(x, y, size, size);
-      }
+    for (const dust of field) {
+      const dx = this.shortestWrappedDelta(dust.x - camera.driftX * dust.parallax);
+      const dy = this.shortestWrappedDelta(dust.y - camera.driftY * dust.parallax);
+      const screenX = camera.screenCenterX - dx * camera.scale;
+      const screenY = camera.screenCenterY - dy * camera.scale;
+      const size = Math.max(1, dust.size * camera.scale);
+      ctx.fillStyle = dust.color;
+      ctx.fillRect(screenX - size / 2, screenY - size / 2, size, size);
     }
     ctx.restore();
   }
@@ -571,7 +609,7 @@ export class CanvasRenderer {
       return;
     }
 
-    const image = this.images.getLoaded('kronBeam');
+    const image = this.images.getLoaded(pickKronBeamKey());
     if (!image) {
       return;
     }
@@ -599,7 +637,7 @@ export class CanvasRenderer {
     const radians = this.getProjectileSpriteRadians(projectile);
     const spec = getShipCatalogEntry(this.shipLoadout[projectile.ownerId] ?? DEFAULT_MATCH_SHIPS[projectile.ownerId]).render;
     const key = this.getProjectileSpriteKey(projectile, spec.projectileKey);
-    const scale = projectile.kind === 'goojJunk' ? 0.075 : projectile.kind === 'kronPulse' ? 0.4 : spec.projectileScale;
+    const scale = this.getProjectileRenderScale(projectile, spec.projectileScale);
     const image = this.images.getLoaded(key);
 
     if (image) {
@@ -628,7 +666,7 @@ export class CanvasRenderer {
     }
 
     if (projectile.kind === 'kronPulse') {
-      return 'kronBeam';
+      return pickKronBeamKey();
     }
 
     if (projectile.kind === 'cannonadeBoomerang') {
@@ -638,8 +676,28 @@ export class CanvasRenderer {
     return fallback;
   }
 
+  private getProjectileRenderScale(projectile: ProjectileState, fallback: number): number {
+    if (projectile.kind === 'goojJunk') {
+      return 0.075;
+    }
+
+    if (projectile.kind === 'kronPulse') {
+      return 0.4;
+    }
+
+    if (projectile.kind === 'frogBubble') {
+      const charge = Math.max(0, (fixedToNumber(projectile.radius) - 10) / 3);
+      return 0.1 * Math.sqrt(charge);
+    }
+
+    return fallback;
+  }
+
   private drawActor(actor: ActorState, camera: LegacyCamera): void {
-    const ctx = this.context;
+    if (actor.kind === 'goojBackNode') {
+      return;
+    }
+
     const x = this.toScreenX(fixedToNumber(actor.x), camera);
     const y = this.toScreenY(fixedToNumber(actor.y), camera);
 
@@ -649,16 +707,6 @@ export class CanvasRenderer {
         return;
       case 'pscoutBeacon':
         this.drawBeaconActor(actor, camera, x, y);
-        return;
-      case 'goojBackNode':
-        ctx.save();
-        ctx.globalAlpha = 0.16;
-        ctx.strokeStyle = PROJECTILE_COLORS[actor.ownerId] ?? '#d2a8ff';
-        ctx.lineWidth = Math.max(1, 2 * camera.scale);
-        ctx.beginPath();
-        ctx.arc(x, y, Math.max(8, fixedToNumber(actor.radius) * camera.scale), 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.restore();
         return;
     }
   }
@@ -694,6 +742,82 @@ export class CanvasRenderer {
     ctx.restore();
   }
 
+  private drawEffect(effect: EffectState, camera: LegacyCamera): void {
+    if (effect.kind === 'thrustDust') {
+      this.drawThrustDust(effect, camera);
+      return;
+    }
+
+    if (effect.kind !== 'shipExplosion') {
+      return;
+    }
+
+    const image = this.images.getLoaded('shipExplosion');
+    const x = this.toScreenX(fixedToNumber(effect.x), camera);
+    const y = this.toScreenY(fixedToNumber(effect.y), camera);
+    const rawFrame = Math.floor((SHIP_EXPLOSION_LIFE_AT_FIRST_FRAME - effect.life) / 2);
+    const frameIndex = rawFrame >= 0 && rawFrame < SHIP_EXPLOSION_FRAME_COUNT ? rawFrame : 0;
+
+    const ctx = this.context;
+    if (!image) {
+      const fallbackRadius = Math.max(2, 18 * camera.scale * (effect.life / Math.max(1, effect.maxLife)));
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.55;
+      ctx.fillStyle = '#ffd28a';
+      ctx.beginPath();
+      ctx.arc(x, y, fallbackRadius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      return;
+    }
+
+    const cellWidth = image.naturalWidth / SHIP_EXPLOSION_FRAME_COUNT;
+    const cellHeight = image.naturalHeight;
+    const drawScale = camera.scale * SHIP_EXPLOSION_RENDER_SCALE;
+    const drawWidth = cellWidth * drawScale;
+    const drawHeight = cellHeight * drawScale;
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.drawImage(
+      image,
+      frameIndex * cellWidth,
+      0,
+      cellWidth,
+      cellHeight,
+      x - drawWidth / 2,
+      y - drawHeight / 2,
+      drawWidth,
+      drawHeight,
+    );
+    ctx.restore();
+  }
+
+  private drawThrustDust(effect: EffectState, camera: LegacyCamera): void {
+    const ctx = this.context;
+    const x = this.toScreenX(fixedToNumber(effect.x), camera);
+    const y = this.toScreenY(fixedToNumber(effect.y), camera);
+    const lifeFraction = Math.max(0, effect.life / Math.max(1, effect.maxLife));
+    const particleScale = fixedToNumber(effect.scale);
+    // Size shrinks gradually; sqrt keeps the puff full-bodied for most of its life.
+    const radius = Math.max(1, THRUST_DUST_BASE_RADIUS * particleScale * Math.sqrt(lifeFraction) * camera.scale);
+    // Alpha holds bright longer before fading toward zero.
+    const alpha = Math.min(1, 0.95 * Math.sqrt(lifeFraction));
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = alpha;
+    const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
+    gradient.addColorStop(0, THRUST_DUST_COLOR);
+    gradient.addColorStop(1, 'rgba(255, 144, 64, 0)');
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
   private drawSpriteNative(key: LegacyAssetKey, scale: number): boolean {
     const image = this.images.getLoaded(key);
     if (!image) {
@@ -718,6 +842,14 @@ export class CanvasRenderer {
   }
 
   private getProjectileSpriteRadians(projectile: ProjectileState): number {
+    if (projectile.kind === 'goojTorp') {
+      return -0.05 * projectile.ttl;
+    }
+
+    if (projectile.kind === 'goojJunk') {
+      return -0.035 * projectile.ttl;
+    }
+
     const vx = fixedToNumber(projectile.vx);
     const vy = fixedToNumber(projectile.vy);
     const direction =
@@ -770,6 +902,14 @@ export class CanvasRenderer {
   }
 }
 
+function pickKronBeamKey(): LegacyAssetKey {
+  return Math.random() < 0.5 ? 'kronBeam' : 'kronBeam2';
+}
+
+export function hasActiveShipExplosion(state: GameState): boolean {
+  return state.effects.some((effect) => effect.kind === 'shipExplosion');
+}
+
 function getAiDebugLabel(mode: AiMovementMode): string {
   switch (mode) {
     case 'pursuit':
@@ -783,22 +923,27 @@ function getAiDebugLabel(mode: AiMovementMode): string {
   }
 }
 
-function createStarField(count: number): readonly StarPlacement[] {
-  let seed = 0x5eed1234;
-  const stars: StarPlacement[] = [];
+function createDustField(count: number, seedValue: number): readonly DustParticle[] {
+  let seed = seedValue >>> 0;
+  const dust: DustParticle[] = [];
 
   for (let index = 0; index < count; index += 1) {
-    const depth = 0.1 + nextRandom() * 0.9;
-    stars.push({
-      key: STAR_KEYS[index % STAR_KEYS.length],
-      x: nextRandom() * LEGACY_ARENA_RADIUS,
-      y: nextRandom() * LEGACY_ARENA_RADIUS,
+    const depth = Math.pow(nextRandom(), DUST_DEPTH_BIAS);
+    const parallax = DUST_MIN_PARALLAX + depth * (DUST_MAX_PARALLAX - DUST_MIN_PARALLAX);
+    const size = DUST_MIN_SIZE + depth * (DUST_MAX_SIZE - DUST_MIN_SIZE);
+    const gray = Math.round(DUST_MIN_GRAY + depth * (DUST_MAX_GRAY - DUST_MIN_GRAY));
+    dust.push({
+      x: (nextRandom() * 2 - 1) * LEGACY_ARENA_RADIUS,
+      y: (nextRandom() * 2 - 1) * LEGACY_ARENA_RADIUS,
       depth,
-      alpha: 0.4 + depth * 0.55,
+      parallax,
+      size,
+      color: `rgb(${gray}, ${gray}, ${gray})`,
     });
   }
 
-  return stars;
+  dust.sort((a, b) => a.depth - b.depth);
+  return dust;
 
   function nextRandom(): number {
     seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;

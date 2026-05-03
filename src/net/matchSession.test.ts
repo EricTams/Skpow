@@ -146,6 +146,48 @@ describe('network match session', () => {
     expect(joiner.currentState?.ships[0].vx).toBe(host.currentState?.ships[0].vx);
   });
 
+  it('spawns thrust dust for the remote owner once they report thrust intent', () => {
+    const { host, joiner } = connectSessions({ seed: 123 });
+
+    // Host thrusts and broadcasts an owner state packet that carries the thrust intent.
+    const hostResult = host.step(InputBits.Thrust);
+    const ownerStatePacket = hostResult.packets.find((packet) => decodeGameplayPacket(packet).type === GameplayPacketType.OwnerState);
+    expect(ownerStatePacket).toBeDefined();
+    if (!ownerStatePacket) {
+      return;
+    }
+    const decoded = decodeGameplayPacket(ownerStatePacket);
+    if (decoded.type !== GameplayPacketType.OwnerState) {
+      throw new Error('expected an owner state packet');
+    }
+    expect(decoded.thrusting).toBe(true);
+
+    joiner.receiveGameplayMessage(ownerStatePacket);
+
+    // Joiner steps with no local input; dust should still spawn for the remote ship.
+    let joinerState = joiner.step(0).state;
+    let remoteDust = joinerState?.effects.filter((effect) => effect.kind === 'thrustDust' && effect.ownerId === 0) ?? [];
+    // Step a few times so we cross at least one spawn interval.
+    for (let frame = 0; frame < 6 && remoteDust.length === 0; frame += 1) {
+      joinerState = joiner.step(0).state;
+      remoteDust = joinerState?.effects.filter((effect) => effect.kind === 'thrustDust' && effect.ownerId === 0) ?? [];
+    }
+    expect(remoteDust.length).toBeGreaterThan(0);
+
+    // Once the host releases thrust the remote dust should stop being spawned.
+    const releasedPacket = host.step(0).packets.find((packet) => decodeGameplayPacket(packet).type === GameplayPacketType.OwnerState);
+    expect(releasedPacket).toBeDefined();
+    if (!releasedPacket) {
+      return;
+    }
+    const releasedDecoded = decodeGameplayPacket(releasedPacket);
+    if (releasedDecoded.type !== GameplayPacketType.OwnerState) {
+      throw new Error('expected an owner state packet');
+    }
+    expect(releasedDecoded.thrusting).toBe(false);
+    joiner.receiveGameplayMessage(releasedPacket);
+  });
+
   it('applies remote projectile spawns idempotently and fast-forwards them', () => {
     const { host, joiner } = connectSessions({ seed: 123 });
     host.step(0);
@@ -255,6 +297,43 @@ describe('network match session', () => {
 
     host.receiveGameplayMessage(hitPacket);
     expect(host.currentState?.ships[1].crew).toBe(defender.crew - 1);
+  });
+
+  it('spawns Zizlik clone actors on the joiner when the host fires its secondary', () => {
+    const { joiner } = connectSessions({ seed: 123, loadout: ['zizlik', 'frog'] });
+    const ship = joiner.currentState?.ships[0];
+    expect(ship).toBeDefined();
+    if (!ship) {
+      return;
+    }
+
+    const baseEvent = {
+      roundId: 0,
+      frame: joiner.currentState?.frame ?? 0,
+      ownerId: 0 as const,
+      weapon: 'secondary' as const,
+      effectKind: 'zizlikNode' as const,
+      x: ship.x,
+      y: ship.y,
+      vx: ship.vx,
+      vy: ship.vy,
+      angle: ship.angle,
+    };
+
+    joiner.receiveGameplayMessage(encodeOwnerWeaponEventPacket({ ...baseEvent, eventId: '0:1:secondary:zizlikNode' }));
+    joiner.receiveGameplayMessage(encodeOwnerWeaponEventPacket({ ...baseEvent, eventId: '0:2:secondary:zizlikNode' }));
+
+    const remoteNodes = joiner.currentState?.actors.filter((actor) => actor.kind === 'zizlikNode' && actor.ownerId === 0) ?? [];
+    expect(remoteNodes).toHaveLength(2);
+    expect(new Set(remoteNodes.map((actor) => actor.slot))).toEqual(new Set([1, -1]));
+
+    // A third event with both slots already occupied should be a no-op.
+    joiner.receiveGameplayMessage(encodeOwnerWeaponEventPacket({ ...baseEvent, eventId: '0:3:secondary:zizlikNode' }));
+    expect(joiner.currentState?.actors.filter((actor) => actor.kind === 'zizlikNode' && actor.ownerId === 0)).toHaveLength(2);
+
+    // Re-delivering the same events must not duplicate the clones (eventId dedup).
+    joiner.receiveGameplayMessage(encodeOwnerWeaponEventPacket({ ...baseEvent, eventId: '0:1:secondary:zizlikNode' }));
+    expect(joiner.currentState?.actors.filter((actor) => actor.kind === 'zizlikNode' && actor.ownerId === 0)).toHaveLength(2);
   });
 
   it('records protocol and session errors for obsolete or invalid packets', () => {

@@ -23,6 +23,9 @@ export interface OwnerStatePacket {
   readonly frame: number;
   readonly playerId: 0 | 1;
   readonly ship: ShipState;
+  // Owner reports whether they were holding thrust this frame so the
+  // remote machine can spawn matching thrust dust effects locally.
+  readonly thrusting?: boolean;
 }
 
 export interface ProjectileSpawnPacket {

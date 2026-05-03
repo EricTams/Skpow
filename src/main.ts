@@ -8,14 +8,14 @@ import { NetworkMatchSession, type NetworkMatchStatus } from './net/matchSession
 import { formatPeerStatus } from './net/peerStatus';
 import { GameplayPacketType } from './net/protocol';
 import { PeerConnectionSession, type ConnectionRole, type ConnectionState } from './net/webrtc';
-import { CanvasRenderer } from './render/canvasRenderer';
+import { CanvasRenderer, hasActiveShipExplosion } from './render/canvasRenderer';
 import { LegacyImageStore, type LegacyImageLoadingProgress, legacyAssets } from './render/legacyAssets';
 import { DEFAULT_MATCH_SHIPS, SHIP_CATALOG, getShipCatalogEntry, type ShipCatalogId } from './ships';
 import { getAiInput, getAiMovementMode, type AiMovementMode } from './sim/ai';
 import type { Fixed } from './sim/fixed';
 import { hashState } from './sim/hash';
 import { createInitialState } from './sim/state';
-import { stepGame } from './sim/step';
+import { isKronBeamHitting, stepGame } from './sim/step';
 import { ANGLE_STEPS, type Angle } from './sim/trig';
 import type { ActorState, GameState, ProjectileState, ShipState } from './sim/types';
 
@@ -57,6 +57,8 @@ interface PresentationCorrection {
   readonly totalFrames: number;
   remainingFrames: number;
 }
+
+type MatchOutcome = { readonly kind: 'active' } | { readonly kind: 'winner'; readonly winnerId: number } | { readonly kind: 'draw' };
 
 type AppPhase =
   | { readonly name: 'loading' }
@@ -234,15 +236,26 @@ createFixedLoop(
     if (appPhase.name === 'fighting') {
       const localInputs = readLocalInputs();
       state = stepGame(state, [localInputs[0], getAiInput(state, 1)]);
-      if (state.winnerId !== null && appPhase.handledWinnerId !== state.winnerId) {
-        resolveLocalRound(appPhase.session, state.winnerId);
+      trackDamage(state);
+      if (hasActiveShipExplosion(state)) {
+        return;
+      }
+      const outcome = getMatchOutcome(state);
+      if (outcome.kind === 'winner' && appPhase.handledWinnerId !== outcome.winnerId) {
+        resolveLocalRound(appPhase.session, outcome.winnerId);
+      } else if (outcome.kind === 'draw' && appPhase.handledWinnerId === null) {
+        resolveLocalMutualDestruction(appPhase.session);
       }
       return;
     }
 
     if (appPhase.name === 'aiDemo') {
       state = stepGame(state, [getAiInput(state, 0), getAiInput(state, 1)]);
-      if (state.winnerId !== null || state.frame >= AI_DEMO_ROUND_FRAMES) {
+      trackDamage(state);
+      if (hasActiveShipExplosion(state)) {
+        return;
+      }
+      if (isAiDemoRoundComplete(state)) {
         startAiDemoRound(appPhase.round + 1);
       }
       return;
@@ -259,13 +272,24 @@ createFixedLoop(
       sendGameplayPackets(result.packets);
       updatePeerStatus();
       syncNetworkLoadoutFromMatch();
-      const winnerId = result.state?.winnerId ?? networkMatch.currentState?.winnerId ?? null;
+      const trackable = result.state ?? networkMatch.currentState;
+      if (trackable) {
+        trackDamage(trackable);
+      }
+      const networkPresentationState = result.state ?? networkMatch.currentState;
+      const outcome = getMatchOutcome(networkPresentationState);
       if (shouldStartNextNetworkAiRound()) {
         startNextNetworkAiRound();
         return;
       }
-      if (winnerId !== null && !networkMatchStatus?.aiDemo && appPhase.handledWinnerId !== winnerId) {
-        appPhase = { name: 'networkResult', winnerId };
+      if (networkPresentationState && hasActiveShipExplosion(networkPresentationState)) {
+        return;
+      }
+      if (outcome.kind === 'winner' && !networkMatchStatus?.aiDemo && appPhase.handledWinnerId !== outcome.winnerId) {
+        appPhase = { name: 'networkResult', winnerId: outcome.winnerId };
+        renderMenu();
+      } else if (outcome.kind === 'draw' && !networkMatchStatus?.aiDemo && appPhase.handledWinnerId === null) {
+        appPhase = { name: 'finalResult', title: 'Draw', detail: 'Both online ships were destroyed.' };
         renderMenu();
       }
     }
@@ -505,7 +529,7 @@ function shouldStartNextNetworkAiRound(): boolean {
   }
 
   const currentState = networkMatch.currentState;
-  return currentState !== null && (currentState.winnerId !== null || currentState.frame >= AI_DEMO_ROUND_FRAMES);
+  return currentState !== null && isAiDemoRoundComplete(currentState);
 }
 
 function startNextNetworkAiRound(): void {
@@ -603,11 +627,28 @@ showOwnLobbiesCheckbox.addEventListener('change', () => {
 mpAiHostCheckbox.addEventListener('change', () => {
   networkDebugSettings = { ...networkDebugSettings, aiHost: mpAiHostCheckbox.checked };
   maybeApplyMpAiImpairmentDefaults(mpAiHostCheckbox.checked);
+  if (
+    mpAiHostCheckbox.checked &&
+    appPhase.name === 'networkFleetBuild' &&
+    appPhase.role === 'host' &&
+    !networkMatch &&
+    peerConnectionState === 'connected'
+  ) {
+    startNetworkMatchWhenReady('host', appPhase.budget, appPhase.lobbyId);
+  }
 });
 
 mpAiJoinerCheckbox.addEventListener('change', () => {
   networkDebugSettings = { ...networkDebugSettings, aiJoiner: mpAiJoinerCheckbox.checked };
   maybeApplyMpAiImpairmentDefaults(mpAiJoinerCheckbox.checked);
+  if (
+    mpAiJoinerCheckbox.checked &&
+    appPhase.name === 'networkFleetBuild' &&
+    appPhase.role === 'joiner' &&
+    !networkMatch
+  ) {
+    autoReadyAiJoiner(appPhase.budget, appPhase.lobbyId);
+  }
 });
 
 for (const input of fakeLagInputs) {
@@ -1044,6 +1085,22 @@ function readyNetworkFleet(): void {
   startNetworkMatchWhenReady(role, budget, lobbyId);
 }
 
+function autoReadyAiJoiner(budget: number, lobbyId: string): void {
+  const selectedShip = chooseRandomCatalogShip();
+  currentLoadout = [DEFAULT_MATCH_SHIPS[0], selectedShip];
+  renderer.setShipLoadout(currentLoadout);
+  renderHud(currentLoadout);
+  networkMatch = new NetworkMatchSession('joiner', { readyImmediately: true });
+  networkMatchStatus = networkMatch.status;
+  presentationCorrection = null;
+  if (!peerSession?.sendControlMessage(`selectedShip:${selectedShip}`)) {
+    log('Could not send AI joiner selected ship to host yet.');
+  }
+  appPhase = { name: 'networkConnecting', role: 'joiner', budget, lobbyId };
+  renderMenu();
+  log(`AI joiner auto-ready with ${getShipCatalogEntry(selectedShip).name}. Waiting for host config...`);
+}
+
 function choosePlayerShip(uid: string): void {
   if (appPhase.name !== 'shipSelect') {
     return;
@@ -1102,6 +1159,33 @@ function resolveLocalRound(session: BattleSession, winnerId: number): void {
   renderMenu();
 }
 
+function resolveLocalMutualDestruction(session: BattleSession): void {
+  const eliminated = new Set(session.selectedShipUids.filter((uid): uid is string => uid !== null));
+  const nextFleets: [readonly FleetShip[], readonly FleetShip[]] = [
+    session.fleets[0].map((ship) => (eliminated.has(ship.uid) ? { ...ship, alive: false } : ship)),
+    session.fleets[1].map((ship) => (eliminated.has(ship.uid) ? { ...ship, alive: false } : ship)),
+  ];
+  const nextSession: BattleSession = {
+    ...session,
+    fleets: nextFleets,
+    selectedShipUids: [null, null],
+  };
+  const playerAlive = hasLivingShips(nextSession.fleets[0]);
+  const aiAlive = hasLivingShips(nextSession.fleets[1]);
+
+  if (!playerAlive && !aiAlive) {
+    appPhase = { name: 'finalResult', title: 'Draw', detail: 'Both fleets were destroyed.' };
+  } else if (!playerAlive) {
+    appPhase = { name: 'finalResult', title: 'AI wins', detail: 'Both ships were destroyed, and you have no ships remaining.' };
+  } else if (!aiAlive) {
+    appPhase = { name: 'finalResult', title: 'Player wins', detail: 'Both ships were destroyed, and the AI has no ships remaining.' };
+  } else {
+    appPhase = { name: 'shipSelect', session: nextSession, message: 'Both ships were destroyed. Pick a new ship.' };
+  }
+
+  renderMenu();
+}
+
 function continueAfterRound(): void {
   if (appPhase.name !== 'roundResult') {
     return;
@@ -1136,6 +1220,22 @@ function startAiDemoRound(round: number): void {
   appPhase = { name: 'aiDemo', round };
   log(`AI vs AI round ${round}: ${getShipCatalogEntry(currentLoadout[0]).name} vs ${getShipCatalogEntry(currentLoadout[1]).name}`);
   renderMenu();
+}
+
+function isAiDemoRoundComplete(nextState: GameState): boolean {
+  return getMatchOutcome(nextState).kind !== 'active' || nextState.frame >= AI_DEMO_ROUND_FRAMES;
+}
+
+function getMatchOutcome(nextState: GameState | null): MatchOutcome {
+  if (!nextState) {
+    return { kind: 'active' };
+  }
+
+  if (nextState.winnerId !== null) {
+    return { kind: 'winner', winnerId: nextState.winnerId };
+  }
+
+  return nextState.ships.every((ship) => !ship.alive) ? { kind: 'draw' } : { kind: 'active' };
 }
 
 function chooseRandomCatalogShip(): ShipCatalogId {
@@ -1330,6 +1430,10 @@ function startNetworkMatchWhenReady(role: ConnectionRole, budget: number, lobbyI
   }
 
   if (role === 'joiner') {
+    if (networkDebugSettings.aiJoiner) {
+      autoReadyAiJoiner(budget, lobbyId);
+      return;
+    }
     if (appPhase.name !== 'networkFleetBuild') {
       appPhase = { name: 'networkFleetBuild', role, budget, lobbyId, fleet: [] };
       renderMenu();
@@ -1555,6 +1659,10 @@ function formatMatchStatus(renderState: GameState): string {
     return formatPhaseStatus();
   }
 
+  if (getMatchOutcome(renderState).kind === 'draw') {
+    return 'Both ships destroyed';
+  }
+
   if (renderState.winnerId === null) {
     if (appPhase.name === 'networkFight') {
       if (networkMatchStatus?.paused) {
@@ -1656,7 +1764,13 @@ function renderPilotHud(shipId: ShipCatalogId, playerIndex: 0 | 1): string {
         ${renderMeter('crew', playerIndex, ship.crew)}
       </div>
       <div class="hud-portrait-frame">
-        <img class="captain-portrait${portraitClass}" src="${legacyAssets[ship.hud.portraitKey].url}" alt="${ship.name} portrait" />
+        <img
+          class="captain-portrait${portraitClass}"
+          src="${legacyAssets[ship.hud.portraitKey].url}"
+          alt="${ship.name} portrait"
+          data-portrait="${playerIndex}"
+          data-default-src="${legacyAssets[ship.hud.portraitKey].url}"
+        />
       </div>
     </section>
   `;
@@ -1711,15 +1825,163 @@ function renderPips(src: string, alt: string, count: number): string {
   return rows.join('');
 }
 
+interface DamageTrackerSnapshot {
+  readonly frame: number;
+  readonly state: GameState;
+}
+
+let damageTrackerSnapshot: DamageTrackerSnapshot | null = null;
+
+function trackDamage(state: GameState): void {
+  if (!damageTrackerSnapshot) {
+    logBattleStart(state);
+    damageTrackerSnapshot = { frame: state.frame, state };
+    return;
+  }
+
+  const previous = damageTrackerSnapshot;
+
+  if (state.frame < previous.frame) {
+    logBattleEnd(previous.state, 'round reset');
+    logBattleStart(state);
+    damageTrackerSnapshot = { frame: state.frame, state };
+    return;
+  }
+
+  if (previous.frame === state.frame) {
+    return;
+  }
+
+  const previousState = previous.state;
+  const previousProjectiles = new Map(previousState.projectiles.map((projectile) => [projectile.id, projectile]));
+  const currentProjectileIds = new Set(state.projectiles.map((projectile) => projectile.id));
+
+  state.ships.forEach((ship, index) => {
+    const previousShip = previousState.ships[index];
+    if (!previousShip) {
+      return;
+    }
+
+    if (ship.crew >= previousShip.crew) {
+      return;
+    }
+
+    const lost = previousShip.crew - ship.crew;
+    const candidates: string[] = [];
+
+    previousProjectiles.forEach((projectile) => {
+      if (!projectile.active || currentProjectileIds.has(projectile.id)) {
+        return;
+      }
+      const ownerLabel = projectile.ownerId === index ? `self#${projectile.ownerId}` : `owner=${projectile.ownerId}`;
+      candidates.push(`${projectile.kind}#${projectile.id}(${ownerLabel},dmg=${projectile.damage})`);
+    });
+
+    state.ships.forEach((other) => {
+      if (other.id === index) {
+        return;
+      }
+      const previousOther = previousState.ships[other.id];
+      if (!previousOther) {
+        return;
+      }
+
+      if (other.shipId === 'pscout') {
+        const previousBeam = previousOther.custom.pscoutBeamFrames ?? 0;
+        const currentBeam = other.custom.pscoutBeamFrames ?? 0;
+        if (previousBeam === 50 && currentBeam === 49) {
+          candidates.push(`pscoutBeam(owner=${other.id},strength=${other.custom.pscoutBeamStrength ?? 0})`);
+        }
+      }
+
+      if (
+        other.shipId === 'kron' &&
+        other.alive &&
+        other.primaryCooldown > previousOther.primaryCooldown &&
+        isKronBeamHitting(previousOther.x, previousOther.y, previousOther.angle, previousShip, previousState)
+      ) {
+        candidates.push(`kronBeam(owner=${other.id})`);
+      }
+    });
+
+    const sourceLabel = candidates.length > 0 ? candidates.join(', ') : 'unknown';
+    console.log(
+      `[damage] f=${state.frame} ship=${index}(${ship.shipId}) crew ${previousShip.crew}->${ship.crew} (-${lost}) source=${sourceLabel}`,
+    );
+  });
+
+  const justDied = state.ships.some((ship, index) => {
+    const previousShip = previousState.ships[index];
+    return Boolean(previousShip?.alive) && !ship.alive;
+  });
+  if (justDied) {
+    logBattleEnd(state, 'ship destroyed');
+  }
+
+  damageTrackerSnapshot = { frame: state.frame, state };
+}
+
+function logBattleStart(state: GameState): void {
+  const summary = state.ships.map(formatShipSummary).join(' vs ');
+  console.log(`[damage] battle start f=${state.frame} ${summary}`);
+}
+
+function logBattleEnd(state: GameState, reason: string): void {
+  const summary = state.ships
+    .map((ship) => `${formatShipSummary(ship)} ${ship.alive ? 'alive' : 'destroyed'}`)
+    .join(' | ');
+  console.log(`[damage] battle end (${reason}) f=${state.frame} ${summary}`);
+}
+
+function formatShipSummary(ship: GameState['ships'][number]): string {
+  const displayName = getShipCatalogEntry(ship.shipId).name;
+  return `${displayName}#${ship.id}(${ship.shipId}) crew=${ship.crew}/${ship.maxCrew} batt=${ship.battery}/${ship.maxBattery}`;
+}
+
 function updateLegacyHud(renderState: GameState): void {
   const crewMeters = Array.from(document.querySelectorAll<HTMLElement>('[data-crew-meter]'));
   const batteryMeters = Array.from(document.querySelectorAll<HTMLElement>('[data-battery-meter]'));
+  const portraits = Array.from(document.querySelectorAll<HTMLImageElement>('[data-portrait]'));
 
   for (const ship of renderState.ships) {
     const crewValue = ship.alive ? ship.crew : 0;
     const batteryValue = ship.alive ? ship.battery : 0;
     setMeterValue(crewMeters[ship.id], crewValue);
     setMeterValue(batteryMeters[ship.id], batteryValue);
+    updatePortrait(portraits[ship.id], ship);
+  }
+}
+
+function updatePortrait(portrait: HTMLImageElement | undefined, ship: GameState['ships'][number]): void {
+  if (!portrait) {
+    return;
+  }
+
+  if (ship.shipId !== 'pscout') {
+    return;
+  }
+
+  const beamFrames = ship.custom.pscoutBeamFrames ?? 0;
+  let nextSrc = portrait.dataset.defaultSrc ?? portrait.src;
+  let jitterY = 0;
+
+  if (beamFrames > 100) {
+    nextSrc = legacyAssets.pscoutPortraitAdmiral.url;
+  } else if (beamFrames > 0) {
+    nextSrc = legacyAssets.pscoutPortraitYgun.url;
+    jitterY = Math.floor(Math.random() * 3) - 1;
+  }
+
+  if (portrait.src !== nextSrc) {
+    portrait.src = nextSrc;
+  }
+
+  const flipped = portrait.classList.contains('captain-portrait-flipped');
+  const baseTransform = flipped ? 'scaleX(-1)' : '';
+  const jitter = jitterY === 0 ? '' : `translateY(${jitterY}px)`;
+  const transform = [baseTransform, jitter].filter(Boolean).join(' ');
+  if (portrait.style.transform !== transform) {
+    portrait.style.transform = transform;
   }
 }
 

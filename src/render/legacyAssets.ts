@@ -63,6 +63,10 @@ export const legacyAssets = {
     relativePath: 'art/beam1.png',
     url: new URL('../../art/beam1.png', import.meta.url).href,
   },
+  kronBeam2: {
+    relativePath: 'art/beam2.png',
+    url: new URL('../../art/beam2.png', import.meta.url).href,
+  },
   goojShip: {
     relativePath: 'art/Gooj_Hagulon_ship.png',
     url: new URL('../../art/Gooj_Hagulon_ship.png', import.meta.url).href,
@@ -251,6 +255,14 @@ export const legacyAssets = {
     relativePath: 'art/panthonpilot.jpg',
     url: new URL('../../art/panthonpilot.jpg', import.meta.url).href,
   },
+  pscoutPortraitAdmiral: {
+    relativePath: 'art/admiral.jpg',
+    url: new URL('../../art/admiral.jpg', import.meta.url).href,
+  },
+  pscoutPortraitYgun: {
+    relativePath: 'art/ygun.jpg',
+    url: new URL('../../art/ygun.jpg', import.meta.url).href,
+  },
   kronPortrait: {
     relativePath: 'art/kronportrait.jpg',
     url: new URL('../../art/kronportrait.jpg', import.meta.url).href,
@@ -274,6 +286,10 @@ export const legacyAssets = {
   energyShot: {
     relativePath: 'art/EnergyShot.png',
     url: new URL('../../art/EnergyShot.png', import.meta.url).href,
+  },
+  shipExplosion: {
+    relativePath: 'art/splosionframes2.png',
+    url: new URL('../../art/splosionframes2.png', import.meta.url).href,
   },
 } as const;
 

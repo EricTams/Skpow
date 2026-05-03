@@ -25,8 +25,10 @@ export function createInitialState(seed = 0x5eed_2026, loadout: readonly [ShipId
     ],
     nextProjectileId: 1,
     nextActorId: actors.length + 1,
+    nextEffectId: 1,
     actors,
     projectiles: [],
+    effects: [],
     rngSeed: rngSeed(seed),
     winnerId: null,
   };

@@ -156,7 +156,7 @@ export const SHIP_CATALOG: readonly ShipCatalogEntry[] = [
       spriteKey: 'goojShip',
       scale: 0.04,
       projectileKey: 'goojShot',
-      projectileScale: 0.25,
+      projectileScale: 0.125,
     },
     hud: {
       nameKey: 'goojName',

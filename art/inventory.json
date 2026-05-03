@@ -1,8 +1,15 @@
 {
-  "generatedAt": "2026-05-01T17:22:04.062Z",
+  "generatedAt": "2026-05-03T18:35:35.342Z",
   "root": "art",
-  "fileCount": 68,
+  "fileCount": 72,
   "files": [
+    {
+      "name": "admiral.jpg",
+      "ext": ".jpg",
+      "relativePath": "art/admiral.jpg",
+      "sizeBytes": 123320,
+      "kind": "image"
+    },
     {
       "name": "barbottom.png",
       "ext": ".png",
@@ -36,6 +43,13 @@
       "ext": ".png",
       "relativePath": "art/beam1.png",
       "sizeBytes": 42111,
+      "kind": "image"
+    },
+    {
+      "name": "beam2.png",
+      "ext": ".png",
+      "relativePath": "art/beam2.png",
+      "sizeBytes": 43893,
       "kind": "image"
     },
     {
@@ -389,6 +403,13 @@
       "kind": "image"
     },
     {
+      "name": "splosionframes2.png",
+      "ext": ".png",
+      "relativePath": "art/splosionframes2.png",
+      "sizeBytes": 719396,
+      "kind": "image"
+    },
+    {
       "name": "star1.png",
       "ext": ".png",
       "relativePath": "art/star1.png",
@@ -449,6 +470,13 @@
       "ext": ".png",
       "relativePath": "art/voskumshot.png",
       "sizeBytes": 3026,
+      "kind": "image"
+    },
+    {
+      "name": "ygun.jpg",
+      "ext": ".jpg",
+      "relativePath": "art/ygun.jpg",
+      "sizeBytes": 84747,
       "kind": "image"
     },
     {

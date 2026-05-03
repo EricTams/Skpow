@@ -32,7 +32,7 @@ export interface ShipSpec {
   readonly crew: number;
   readonly battery: number;
   readonly batteryChargeFrames: number;
-  readonly turnStep: number;
+  readonly turnStep: Fixed;
   readonly maxSpeed: Fixed;
   readonly accel: Fixed;
   readonly brake: Fixed;
@@ -40,8 +40,9 @@ export interface ShipSpec {
   readonly renderScale: number;
   readonly primary: WeaponSpec;
   readonly secondary: WeaponSpec;
+  readonly cannonTurnStep?: Fixed;
   readonly longRange?: {
-    readonly turnStep: number;
+    readonly turnStep: Fixed;
     readonly maxSpeed: Fixed;
     readonly accel: Fixed;
     readonly primary: WeaponSpec;
@@ -91,6 +92,7 @@ export const SHIP_SPECS: Record<ShipId, ShipSpec> = {
     battery: 24,
     batteryChargeFrames: 80,
     turnStep: legacyTurnStep(0.005),
+    cannonTurnStep: literalTurnStep(0.016),
     maxSpeed: legacyMaxSpeed(0.75),
     accel: legacyAccel(0.02),
     brake: fixed(0.99),
@@ -299,8 +301,12 @@ export function getShipSpec(id: ShipId): ShipSpec {
   return SHIP_SPECS[id];
 }
 
-function legacyTurnStep(turnSpeedRadians: number): number {
-  return Math.max(1, Math.round(((turnSpeedRadians * 1.6) / (Math.PI * 2)) * 256));
+function legacyTurnStep(turnSpeedRadians: number): Fixed {
+  return fixed(((turnSpeedRadians * 1.6) / (Math.PI * 2)) * 256);
+}
+
+function literalTurnStep(turnSpeedRadians: number): Fixed {
+  return fixed((turnSpeedRadians / (Math.PI * 2)) * 256);
 }
 
 function legacyMaxSpeed(maxSpeed: number): Fixed {

@@ -1,8 +1,9 @@
 import type { Fixed } from '../sim/fixed';
 import { fixedAdd, fixedMul, fixedSub, fixed, fixedSquared, fixedSqrt, fixedToNumber } from '../sim/fixed';
+import { getShipSpec } from '../sim/shipSpecs';
 import { stepGame } from '../sim/step';
 import { ANGLE_STEPS, angle } from '../sim/trig';
-import type { ArenaState, GameState, ProjectileState, ShipState } from '../sim/types';
+import type { ActorState, ArenaState, GameState, ProjectileState, ShipState } from '../sim/types';
 import type { OwnerWeaponEventPacket } from './protocol';
 
 export type PlayerIndex = 0 | 1;
@@ -125,24 +126,43 @@ export class OwnerAuthoritySession {
       };
     }
 
+    // Some secondary effects spawn attached actors (e.g. Zizlik clones). The receiver
+    // needs to mirror that spawn locally because the remote ship's input bits aren't
+    // replayed through stepGame, so the secondary fire branch never runs here.
+    const spawnedActors: ActorState[] = [];
+    let nextActorId = this.state.nextActorId;
+    if (packet.effectKind === 'zizlikNode') {
+      const node = createZizlikNodeActor(this.state.actors, nextShip, packet.ownerId, nextActorId);
+      if (node) {
+        spawnedActors.push(node);
+        nextActorId += 1;
+      }
+    }
+
     this.state = {
       ...this.state,
       ships: this.state.ships.map((candidate) => (candidate.id === packet.ownerId ? nextShip : candidate)),
+      actors: spawnedActors.length > 0 ? [...this.state.actors, ...spawnedActors] : this.state.actors,
+      nextActorId,
     };
     return true;
   }
 
-  public step(localInput: number): OwnerAuthorityStepResult {
-    this.state = this.stepOwnerOnly(this.state, localInput);
+  public step(localInput: number, remoteInput = 0): OwnerAuthorityStepResult {
+    this.state = this.stepOwnerOnly(this.state, localInput, remoteInput);
     return {
       state: this.state,
       frame: this.state.frame,
     };
   }
 
-  private stepOwnerOnly(state: GameState, localInput: number): GameState {
+  private stepOwnerOnly(state: GameState, localInput: number, remoteInput: number): GameState {
     const remoteShip = state.ships[otherPlayerIndex(this.localPlayerIndex)];
-    const next = stepGame(state, this.localPlayerIndex === 0 ? [localInput, 0] : [0, localInput]);
+    // The remote ship's authoritative state is replaced via fastForwardShip below, so
+    // the only persistent effect of `remoteInput` here is on visual-only state such as
+    // dust particles in `state.effects`. Callers are expected to supply only the bits
+    // that the remote owner reported (e.g. Thrust) so visuals match the owner's intent.
+    const next = stepGame(state, this.localPlayerIndex === 0 ? [localInput, remoteInput] : [remoteInput, localInput]);
     const previousProjectileIds = new Set(state.projectiles.map((projectile) => projectile.id));
     const projectiles = next.projectiles
       .filter((projectile) => projectile.ownerId === this.localPlayerIndex || previousProjectileIds.has(projectile.id))
@@ -295,6 +315,37 @@ function clampRadians(value: number): number {
 
 function otherPlayerIndex(playerIndex: PlayerIndex): PlayerIndex {
   return playerIndex === 0 ? 1 : 0;
+}
+
+function createZizlikNodeActor(
+  actors: readonly ActorState[],
+  ship: ShipState,
+  ownerId: number,
+  nextActorId: number,
+): ActorState | null {
+  const occupied = new Set(
+    actors
+      .filter((actor) => actor.active && actor.kind === 'zizlikNode' && actor.ownerId === ownerId)
+      .map((actor) => actor.slot),
+  );
+  const slot = !occupied.has(1) ? 1 : !occupied.has(-1) ? -1 : null;
+  if (slot === null) {
+    return null;
+  }
+
+  return {
+    id: nextActorId,
+    kind: 'zizlikNode',
+    ownerId,
+    attachedToShipId: ownerId,
+    slot,
+    x: ship.x,
+    y: ship.y,
+    angle: angle(0),
+    radius: getShipSpec(ship.shipId).radius,
+    ttl: null,
+    active: true,
+  };
 }
 
 function getWinnerId(ships: readonly GameState['ships'][number][]): number | null {

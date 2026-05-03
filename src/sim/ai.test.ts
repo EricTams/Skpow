@@ -90,6 +90,41 @@ describe('reference-style AI input', () => {
     expect(input & InputBits.FireSecondary).toBe(0);
   });
 
+  it('fires the Cannonade primary when its barrel is aimed at the enemy even if the hull is not', () => {
+    const state = withShips(createInitialState(123, ['frog', 'cannonade']), [
+      { id: 0, x: fixedFromInt(0), y: fixedFromInt(400), angle: angle(0) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(192), custom: { cannonAngle: angle(64) } },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FirePrimary).toBe(InputBits.FirePrimary);
+  });
+
+  it('holds the Cannonade primary when the hull points at the enemy but the barrel is swept off-target', () => {
+    const state = withShips(createInitialState(123, ['frog', 'cannonade']), [
+      { id: 0, x: fixedFromInt(0), y: fixedFromInt(400), angle: angle(0) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(64), custom: { cannonAngle: angle(128) } },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FirePrimary).toBe(0);
+    expect((input & InputBits.TurnLeft) | (input & InputBits.TurnRight)).not.toBe(0);
+  });
+
+  it('rotates the Cannonade hull (not the barrel) outward when drifting into the planet well', () => {
+    const state = withShips(createInitialState(123, ['frog', 'cannonade']), [
+      { id: 0, x: fixedFromInt(1500), y: fixedFromInt(0), angle: angle(0) },
+      { id: 1, x: fixedFromInt(260), y: fixedFromInt(0), vx: fixed(-1), angle: angle(192), custom: { cannonAngle: angle(64) } },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.TurnRight).toBe(InputBits.TurnRight);
+    expect(input & InputBits.TurnLeft).toBe(0);
+  });
+
   it('steers around pursuit paths that cross the planet', () => {
     const state = withShips(createInitialState(123), [
       { id: 0, x: fixedFromInt(500), y: fixedFromInt(0), angle: angle(128) },
@@ -161,6 +196,105 @@ describe('reference-style AI input', () => {
 
     expect(input & InputBits.FireSecondary).toBe(0);
     expect(input & InputBits.FirePrimary).toBe(InputBits.FirePrimary);
+  });
+
+  it('fires Kron secondary when in range, aimed at the enemy, and closing in', () => {
+    const state = withShips(createInitialState(123, ['frog', 'kron']), [
+      { id: 0, x: fixedFromInt(300), y: fixedFromInt(0), angle: angle(128), vx: fixed(0), vy: fixed(0) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), vx: fixed(1), vy: fixed(0) },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FireSecondary).toBe(InputBits.FireSecondary);
+  });
+
+  it('holds Kron secondary when out of range and drifting away from the target', () => {
+    const state = withShips(createInitialState(123, ['frog', 'kron']), [
+      { id: 0, x: fixedFromInt(700), y: fixedFromInt(0), angle: angle(128), vx: fixed(0), vy: fixed(0) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(128), vx: fixed(-1), vy: fixed(0) },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FireSecondary).toBe(0);
+  });
+
+  it('holds Kron secondary when in range but pointed away from the enemy', () => {
+    const state = withShips(createInitialState(123, ['frog', 'kron']), [
+      { id: 0, x: fixedFromInt(300), y: fixedFromInt(0), angle: angle(128), vx: fixed(0), vy: fixed(0) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(128), vx: fixed(0), vy: fixed(0) },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FireSecondary).toBe(0);
+  });
+
+  it('holds Kron secondary when out of range even while closing in', () => {
+    const state = withShips(createInitialState(123, ['frog', 'kron']), [
+      { id: 0, x: fixedFromInt(700), y: fixedFromInt(0), angle: angle(128), vx: fixed(0), vy: fixed(0) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), vx: fixed(2), vy: fixed(0) },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FireSecondary).toBe(0);
+  });
+
+  it('holds the frog fire button (charging) when not yet aimed at the enemy', () => {
+    const state = withShips(createInitialState(123, ['cannonade', 'frog']), [
+      { id: 0, x: fixedFromInt(0), y: fixedFromInt(400), angle: angle(0) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), custom: { frogCharge: 0 } },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FirePrimary).toBe(InputBits.FirePrimary);
+  });
+
+  it('holds the frog fire button when aimed and in range but no charge is built up yet', () => {
+    const state = withShips(createInitialState(123, ['cannonade', 'frog']), [
+      { id: 0, x: fixedFromInt(400), y: fixedFromInt(0), angle: angle(128) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), custom: { frogCharge: 0 } },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FirePrimary).toBe(InputBits.FirePrimary);
+  });
+
+  it('releases the frog fire button to fire the bubble when aimed, in range, and charged', () => {
+    const state = withShips(createInitialState(123, ['cannonade', 'frog']), [
+      { id: 0, x: fixedFromInt(400), y: fixedFromInt(0), angle: angle(128) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), custom: { frogCharge: 1 } },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FirePrimary).toBe(0);
+  });
+
+  it('keeps holding the frog fire button while charged but out of range', () => {
+    const state = withShips(createInitialState(123, ['cannonade', 'frog']), [
+      { id: 0, x: fixedFromInt(900), y: fixedFromInt(0), angle: angle(128) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), custom: { frogCharge: 4 } },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FirePrimary).toBe(InputBits.FirePrimary);
+  });
+
+  it('holds Kron secondary when the enemy is already frozen', () => {
+    const state = withShips(createInitialState(123, ['frog', 'kron']), [
+      { id: 0, x: fixedFromInt(300), y: fixedFromInt(0), angle: angle(128), vx: fixed(0), vy: fixed(0), freezeFrames: 60 },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), vx: fixed(1), vy: fixed(0) },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FireSecondary).toBe(0);
   });
 });
 

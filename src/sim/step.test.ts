@@ -3,8 +3,9 @@ import { describe, expect, it } from 'vitest';
 import { fixed, fixedFromInt, fixedToNumber, type Fixed } from './fixed';
 import { hashState } from './hash';
 import { runReplay } from './replay';
+import { getShipSpec } from './shipSpecs';
 import { createInitialState } from './state';
-import { stepGame } from './step';
+import { getThrustPipCount, stepGame } from './step';
 import { angle } from './trig';
 import { InputBits, type GameState, type ProjectileState, type ShipState } from './types';
 
@@ -63,6 +64,129 @@ describe('sudden-death match loop', () => {
   });
 });
 
+describe('death explosion effect', () => {
+  it('spawns three ship explosions clustered around the dying ship', () => {
+    const next = stepGame(withProjectileAtShip(createInitialState(123), 0, 1), [0, 0]);
+    const target = next.ships[1];
+    const explosions = next.effects.filter((effect) => effect.kind === 'shipExplosion');
+
+    expect(explosions).toHaveLength(3);
+    expect(new Set(explosions.map((effect) => effect.life))).toEqual(new Set([80, 110, 140]));
+    expect(explosions.every((effect) => effect.life === effect.maxLife)).toBe(true);
+    for (const effect of explosions) {
+      expect(Math.abs(fixedToNumber(effect.x) - fixedToNumber(target.x))).toBeLessThanOrEqual(50);
+      expect(Math.abs(fixedToNumber(effect.y) - fixedToNumber(target.y))).toBeLessThanOrEqual(50);
+    }
+  });
+
+  it('decrements explosion life each frame and clears them when the longest one expires', () => {
+    let state = stepGame(withProjectileAtShip(createInitialState(123), 0, 1), [0, 0]);
+    const longestLife = Math.max(...state.effects.map((effect) => effect.life));
+
+    for (let frame = 0; frame < longestLife - 1; frame += 1) {
+      state = stepGame(state, [0, 0]);
+    }
+
+    expect(state.effects).toHaveLength(1);
+    expect(state.effects[0].life).toBe(1);
+
+    state = stepGame(state, [0, 0]);
+    expect(state.effects).toHaveLength(0);
+  });
+
+  it('keeps the explosion lifecycle deterministic under replay', () => {
+    const initial = withProjectileAtShip(createInitialState(123), 0, 1);
+    const inputs = Array.from({ length: 50 }, () => [0, 0] as const);
+    const first = runReplay(initial, inputs, hashState);
+    const second = runReplay(initial, inputs, hashState);
+
+    expect(first.frameHashes).toEqual(second.frameHashes);
+    expect(first.finalState.effects).toEqual(second.finalState.effects);
+  });
+});
+
+describe('thrust dust effect', () => {
+  it('does not spawn dust when thrust is not held', () => {
+    let state = createInitialState(123);
+    for (let frame = 0; frame < 30; frame += 1) {
+      state = stepGame(state, [0, 0]);
+    }
+
+    expect(state.effects.filter((effect) => effect.kind === 'thrustDust')).toHaveLength(0);
+  });
+
+  it('spawns thrust dust behind the ship while thrust is held', () => {
+    const state = createInitialState(123, ['frog', 'cannonade']);
+    const next = stepGame(state, [InputBits.Thrust, 0]);
+    const dust = next.effects.filter((effect) => effect.kind === 'thrustDust' && effect.ownerId === 0);
+
+    expect(dust.length).toBeGreaterThan(0);
+    expect(dust.every((effect) => effect.life === effect.maxLife)).toBe(true);
+    // Each particle should sit behind the ship: dot(particle - ship, facing) <= 0.
+    const ship = next.ships[0];
+    const facingX = Math.cos((ship.angle / 256) * Math.PI * 2);
+    const facingY = Math.sin((ship.angle / 256) * Math.PI * 2);
+    for (const effect of dust) {
+      const dx = fixedToNumber(effect.x) - fixedToNumber(ship.x);
+      const dy = fixedToNumber(effect.y) - fixedToNumber(ship.y);
+      expect(dx * facingX + dy * facingY).toBeLessThanOrEqual(0.5);
+    }
+  });
+
+  it('uses more pips for ships with higher accel * area force', () => {
+    const frogPips = getThrustPipCount(getShipSpec('frog'));
+    const zizlikPips = getThrustPipCount(getShipSpec('zizlik'));
+    const goojPips = getThrustPipCount(getShipSpec('gooj'));
+
+    expect(frogPips).toBeGreaterThanOrEqual(1);
+    expect(goojPips).toBeGreaterThanOrEqual(1);
+    expect(zizlikPips).toBeGreaterThan(frogPips);
+  });
+
+  it('emits a fresh batch of dust on each spawn interval', () => {
+    let state = createInitialState(123, ['zizlik', 'cannonade']);
+    const seenIds = new Set<number>();
+    let spawnedBatches = 0;
+    for (let frame = 0; frame < 25; frame += 1) {
+      state = stepGame(state, [InputBits.Thrust, 0]);
+      const myDust = state.effects.filter((effect) => effect.kind === 'thrustDust' && effect.ownerId === 0);
+      const fresh = myDust.filter((effect) => effect.life === effect.maxLife && !seenIds.has(effect.id));
+      if (fresh.length > 0) {
+        spawnedBatches += 1;
+        for (const effect of fresh) {
+          seenIds.add(effect.id);
+        }
+      }
+    }
+
+    expect(spawnedBatches).toBeGreaterThanOrEqual(2);
+  });
+
+  it('expires thrust dust after its life span when thrust stops', () => {
+    let state = createInitialState(123);
+    state = stepGame(state, [InputBits.Thrust, 0]);
+    const initialDust = state.effects.filter((effect) => effect.kind === 'thrustDust');
+    expect(initialDust.length).toBeGreaterThan(0);
+    const longestLife = Math.max(...initialDust.map((effect) => effect.life));
+
+    for (let frame = 0; frame < longestLife; frame += 1) {
+      state = stepGame(state, [0, 0]);
+    }
+
+    expect(state.effects.filter((effect) => effect.kind === 'thrustDust')).toHaveLength(0);
+  });
+
+  it('keeps thrust dust deterministic under replay', () => {
+    const initial = createInitialState(123);
+    const inputs = Array.from({ length: 30 }, () => [InputBits.Thrust, 0] as const);
+    const first = runReplay(initial, inputs, hashState);
+    const second = runReplay(initial, inputs, hashState);
+
+    expect(first.frameHashes).toEqual(second.frameHashes);
+    expect(first.finalState.effects).toEqual(second.finalState.effects);
+  });
+});
+
 describe('ship physics', () => {
   it('starts in the signed legacy-sized wrapped arena', () => {
     const state = createInitialState(123);
@@ -89,10 +213,62 @@ describe('ship physics', () => {
 
   it('turns in responsive fine-grained angle steps', () => {
     const state = createInitialState(123);
+    const oneFrame = stepGame(state, [InputBits.TurnRight, 0]);
+    const twoFrames = stepGame(oneFrame, [InputBits.TurnRight, 0]);
 
-    const next = stepGame(state, [InputBits.TurnRight, 0]);
+    expect(oneFrame.ships[0].angle).toBe(angle(0));
+    expect(twoFrames.ships[0].angle).toBe(angle(1));
+  });
 
-    expect(next.ships[0].angle).toBe(angle(1));
+  it('sweeps the cannonade barrel ahead of its hull while turning', () => {
+    let state = createInitialState(123, ['cannonade', 'frog']);
+    for (let frame = 0; frame < 20; frame += 1) {
+      state = stepGame(state, [InputBits.TurnRight, 0]);
+    }
+
+    const cannonade = state.ships[0];
+    const cannon = cannonade.custom.cannonAngle ?? cannonade.angle;
+    const cannonOffset = (cannon - cannonade.angle) & 255;
+    expect(cannonOffset).toBeGreaterThan(0);
+    expect(cannonOffset).toBeLessThanOrEqual(128);
+  });
+
+  it('preserves the reference krab turn-rate ratio between short and long range forms', () => {
+    const seeded = createInitialState(123, ['krab', 'frog']);
+    const krabShortRange: GameState = {
+      ...seeded,
+      ships: seeded.ships.map((ship) =>
+        ship.id === 0
+          ? { ...ship, custom: { ...ship.custom, krabLongRange: false }, angle: angle(0) }
+          : ship,
+      ),
+    };
+    const krabLongRange: GameState = {
+      ...seeded,
+      ships: seeded.ships.map((ship) =>
+        ship.id === 0
+          ? { ...ship, custom: { ...ship.custom, krabLongRange: true }, angle: angle(0) }
+          : ship,
+      ),
+    };
+
+    const stepsToRotateOnce = (initial: GameState): number => {
+      let state = initial;
+      let frames = 0;
+      while (state.ships[0].angle === angle(0)) {
+        state = stepGame(state, [InputBits.TurnRight, 0]);
+        frames += 1;
+        if (frames > 1000) {
+          throw new Error('ship never advanced an angle step');
+        }
+      }
+      return frames;
+    };
+
+    const shortFrames = stepsToRotateOnce(krabShortRange);
+    const longFrames = stepsToRotateOnce(krabLongRange);
+
+    expect(longFrames).toBeGreaterThan(shortFrames * 2);
   });
 
   it('uses stronger planet gravity near the planet than farther away', () => {
@@ -331,6 +507,37 @@ describe('reference-backed ship abilities', () => {
     expect(next.projectiles.every((projectile) => fixedToNumber(next.ships[0].x) - fixedToNumber(projectile.x) > 30)).toBe(true);
   });
 
+  it('does not let a ship damage itself by shooting an enemy actor riding on its hull', () => {
+    const seeded = createInitialState(123, ['pscout', 'zizlik']);
+    const target = seeded.ships[1];
+    const beacon = {
+      id: 200,
+      kind: 'pscoutBeacon' as const,
+      ownerId: 0,
+      attachedToShipId: 1,
+      slot: 0,
+      x: target.x,
+      y: target.y,
+      angle: target.angle,
+      radius: fixedFromInt(10),
+      ttl: null,
+      active: true,
+    };
+    const state: GameState = {
+      ...seeded,
+      actors: [...seeded.actors, beacon],
+      projectiles: [
+        buildProjectile({ ownerId: 1, x: target.x, y: target.y, damage: 1, kind: 'zizlikShot' }),
+      ],
+      nextProjectileId: 300,
+    };
+
+    const next = stepGame(state, [0, 0]);
+
+    expect(next.ships[1].crew).toBe(target.crew);
+    expect(next.actors.filter((actor) => actor.kind === 'pscoutBeacon')).toHaveLength(1);
+  });
+
   it('attaches pScout beacons and spends them with the beam special', () => {
     const beaconHit = stepGame(withProjectileAtShip(createInitialState(123, ['pscout', 'frog']), 0, 1, 0, 'pscoutBeacon'), [0, 0]);
     const withBeacons = withShip(beaconHit, { custom: { ...beaconHit.ships[0].custom } });
@@ -346,12 +553,13 @@ describe('reference-backed ship abilities', () => {
       ],
     };
     let beamed = stepGame(readyToBeam, [InputBits.FireSecondary, 0]);
-    for (let frame = 0; frame < 51; frame += 1) {
+    expect(beamed.ships[0].battery).toBe(2);
+
+    for (let frame = 0; frame < 151; frame += 1) {
       beamed = stepGame(beamed, [0, 0]);
     }
 
     expect(beaconHit.actors.filter((actor) => actor.kind === 'pscoutBeacon' && actor.attachedToShipId === 1)).toHaveLength(1);
-    expect(beamed.ships[0].battery).toBe(2);
     expect(beamed.ships[1].crew).toBe(26);
     expect(beamed.actors.filter((actor) => actor.kind === 'pscoutBeacon' && actor.attachedToShipId === 1)).toHaveLength(0);
   });

@@ -9,12 +9,21 @@ import {
   fixedSquared,
   fixedSub,
   fixedToNumber,
+  FIXED_ONE,
   type Fixed,
 } from './fixed';
 import { randomUnit, type RngSeed } from './rng';
 import { getShipSpec, type ProjectileKind, type ShipSpec, type WeaponSpec } from './shipSpecs';
 import { angle, ANGLE_STEPS, cosFixed, sinFixed, turn, type Angle } from './trig';
-import { InputBits, type ActorState, type FrameInputs, type GameState, type ProjectileState, type ShipState } from './types';
+import {
+  InputBits,
+  type ActorState,
+  type EffectState,
+  type FrameInputs,
+  type GameState,
+  type ProjectileState,
+  type ShipState,
+} from './types';
 
 const TOP_SPEED_ALLOWANCE = fixedFromInt(2);
 const CLOSE_PLANET_SPEED_BOOST = fixedFromInt(2000);
@@ -41,9 +50,34 @@ const GOOJ_BACK_NODE_OFFSET = fixedFromInt(-40);
 const GOOJ_JUNK_SHOT_VARIANCE_RADIANS = 0.1;
 const GOOJ_JUNK_VARIETIES = 7;
 const PSCOUT_BEAM_FRAMES = 200;
-const PSCOUT_BEAM_DAMAGE_FRAME = 150;
+const PSCOUT_BEAM_DAMAGE_FRAME = 50;
 const CANNONADE_SECONDARY_RELOAD_FRAMES = Math.round(0.25 * 60);
 const CANNONADE_SECONDARY_ACTIVE_COOLDOWN = 1;
+const SHIP_EXPLOSION_PARTICLE_COUNT = 3;
+const SHIP_EXPLOSION_BASE_LIFE = 80;
+const SHIP_EXPLOSION_LIFE_STEP = 30;
+const SHIP_EXPLOSION_SPREAD = 100;
+export const SHIP_EXPLOSION_MAX_LIFE = SHIP_EXPLOSION_BASE_LIFE + SHIP_EXPLOSION_LIFE_STEP * (SHIP_EXPLOSION_PARTICLE_COUNT - 1);
+
+const THRUST_DUST_SPAWN_INTERVAL = 5;
+const THRUST_DUST_LIFE = 90;
+// Pip count = K * accel * radius^2 (force ≈ mass * accel, mass scales with hitbox area).
+// Calibrated so a mid-tier ship like Frog produces ~2 pips per spawn.
+const THRUST_DUST_PIP_K = 0.17;
+const THRUST_DUST_MAX_PIPS = 4;
+const THRUST_DUST_TAIL_OFFSET = fixed(1.0);
+const THRUST_DUST_SIDE_OFFSET = fixedFromInt(3);
+const THRUST_DUST_BASE_SCALE = fixed(0.18);
+const THRUST_DUST_SCALE_JITTER = fixed(0.18);
+const THRUST_DUST_SHIP_VELOCITY_SHARE = fixed(1.0);
+const THRUST_DUST_BACKWARD_SPEED = fixed(1.0);
+
+export function getThrustPipCount(spec: ShipSpec): number {
+  const accel = fixedToNumber(spec.accel);
+  const radius = fixedToNumber(spec.radius);
+  const pips = Math.round(THRUST_DUST_PIP_K * accel * radius * radius);
+  return Math.min(THRUST_DUST_MAX_PIPS, Math.max(1, pips));
+}
 
 interface DamageEffect {
   readonly targetId: number;
@@ -74,11 +108,13 @@ export function stepGame(state: GameState, inputs: FrameInputs): GameState {
     return {
       ...state,
       frame: state.frame + 1,
+      effects: stepEffects(state.effects, state.arena),
     };
   }
 
   let nextProjectileId = state.nextProjectileId;
   let nextActorId = state.nextActorId;
+  let nextEffectId = state.nextEffectId;
   let rngSeed = state.rngSeed;
   const spawned: ProjectileState[] = [];
   const spawnedActors: ActorState[] = [];
@@ -102,6 +138,24 @@ export function stepGame(state: GameState, inputs: FrameInputs): GameState {
     return result.ship;
   });
 
+  const thrustDustEffects: EffectState[] = [];
+  for (let index = 0; index < ships.length; index += 1) {
+    const ship = ships[index];
+    const input = inputs[index] ?? 0;
+    const thrusting = (input & InputBits.Thrust) !== 0;
+    const dustResult = spawnThrustDustEffects(
+      ship,
+      getActiveSpec(ship),
+      thrusting,
+      state.frame,
+      nextEffectId,
+      rngSeed,
+    );
+    thrustDustEffects.push(...dustResult.effects);
+    nextEffectId = dustResult.nextEffectId;
+    rngSeed = dustResult.rngSeed;
+  }
+
   let affectedShips = applyEffects(ships, damageEffects, freezeEffects, clearBeaconsFor);
   let actors = updateActors([...state.actors, ...spawnedActors], affectedShips, clearBeaconsFor);
   const projectilesBeforeResolution = [...state.projectiles, ...spawned];
@@ -114,17 +168,141 @@ export function stepGame(state: GameState, inputs: FrameInputs): GameState {
   actors = hitResult.actors;
   nextActorId = hitResult.nextActorId;
 
+  const deathSpawn = spawnShipExplosionEffects(state.ships, affectedShips, nextEffectId, rngSeed);
+  nextEffectId = deathSpawn.nextEffectId;
+  rngSeed = deathSpawn.rngSeed;
+  const effects = [...stepEffects(state.effects, state.arena), ...thrustDustEffects, ...deathSpawn.effects];
+
   return {
     ...state,
     frame: state.frame + 1,
     ships: affectedShips,
     actors,
     projectiles: hitResult.projectiles,
+    effects,
     nextProjectileId,
     nextActorId,
+    nextEffectId,
     rngSeed,
     winnerId: hitResult.winnerId,
   };
+}
+
+function stepEffects(effects: readonly EffectState[], arena: GameState['arena']): readonly EffectState[] {
+  return effects
+    .map((effect) => ({
+      ...effect,
+      x: wrapSignedFixed(fixedAdd(effect.x, effect.vx), arena.width),
+      y: wrapSignedFixed(fixedAdd(effect.y, effect.vy), arena.height),
+      life: effect.life - 1,
+    }))
+    .filter((effect) => effect.life > 0);
+}
+
+function spawnShipExplosionEffects(
+  previousShips: readonly ShipState[],
+  currentShips: readonly ShipState[],
+  nextEffectId: number,
+  rngSeed: RngSeed,
+): { readonly effects: readonly EffectState[]; readonly nextEffectId: number; readonly rngSeed: RngSeed } {
+  const newEffects: EffectState[] = [];
+  let id = nextEffectId;
+  let seed = rngSeed;
+
+  for (let index = 0; index < currentShips.length; index += 1) {
+    const previous = previousShips[index];
+    const current = currentShips[index];
+    if (!previous?.alive || current.alive) {
+      continue;
+    }
+
+    for (let particle = 0; particle < SHIP_EXPLOSION_PARTICLE_COUNT; particle += 1) {
+      const xRoll = nextRandom(seed);
+      seed = xRoll.seed;
+      const yRoll = nextRandom(seed);
+      seed = yRoll.seed;
+      const offsetX = fixed((xRoll.value - 0.5) * SHIP_EXPLOSION_SPREAD);
+      const offsetY = fixed((yRoll.value - 0.5) * SHIP_EXPLOSION_SPREAD);
+      const life = SHIP_EXPLOSION_BASE_LIFE + SHIP_EXPLOSION_LIFE_STEP * particle;
+
+      newEffects.push({
+        id,
+        kind: 'shipExplosion',
+        ownerId: current.id,
+        x: fixedAdd(current.x, offsetX),
+        y: fixedAdd(current.y, offsetY),
+        vx: fixed(0),
+        vy: fixed(0),
+        scale: fixed(1),
+        life,
+        maxLife: life,
+      });
+      id += 1;
+    }
+  }
+
+  return { effects: newEffects, nextEffectId: id, rngSeed: seed };
+}
+
+function spawnThrustDustEffects(
+  ship: ShipState,
+  spec: ShipSpec,
+  thrusting: boolean,
+  frame: number,
+  nextEffectId: number,
+  rngSeed: RngSeed,
+): { readonly effects: readonly EffectState[]; readonly nextEffectId: number; readonly rngSeed: RngSeed } {
+  if (!thrusting || !ship.alive || frame % THRUST_DUST_SPAWN_INTERVAL !== 0) {
+    return { effects: [], nextEffectId, rngSeed };
+  }
+
+  const pipCount = getThrustPipCount(spec);
+  const newEffects: EffectState[] = [];
+  let id = nextEffectId;
+  let seed = rngSeed;
+
+  const facingCos = cosFixed(ship.angle);
+  const facingSin = sinFixed(ship.angle);
+  const perpAngle = turn(ship.angle, Math.round(ANGLE_STEPS / 4));
+  const perpCos = cosFixed(perpAngle);
+  const perpSin = sinFixed(perpAngle);
+
+  // Anchor just behind the ship: position - facing * (radius * tailOffset).
+  const tailX = fixedSub(ship.x, fixedMul(facingCos, fixedMul(spec.radius, THRUST_DUST_TAIL_OFFSET)));
+  const tailY = fixedSub(ship.y, fixedMul(facingSin, fixedMul(spec.radius, THRUST_DUST_TAIL_OFFSET)));
+  const backwardSpeed = fixedToNumber(THRUST_DUST_BACKWARD_SPEED);
+  const backwardVx = fixedMul(facingCos, fixed(-backwardSpeed));
+  const backwardVy = fixedMul(facingSin, fixed(-backwardSpeed));
+  const inheritedVx = fixedMul(ship.vx, THRUST_DUST_SHIP_VELOCITY_SHARE);
+  const inheritedVy = fixedMul(ship.vy, THRUST_DUST_SHIP_VELOCITY_SHARE);
+
+  for (let pip = 0; pip < pipCount; pip += 1) {
+    // Alternate left/right of the tail; widen successive pairs so they don't overlap.
+    const side = pip % 2 === 0 ? 1 : -1;
+    const tierMagnitude = Math.floor(pip / 2) + 1;
+    const lateralUnits = fixedToNumber(THRUST_DUST_SIDE_OFFSET) * side * tierMagnitude;
+    const lateralOffset = fixed(lateralUnits);
+
+    const scaleRoll = nextRandom(seed);
+    seed = scaleRoll.seed;
+    const scale = fixedAdd(THRUST_DUST_BASE_SCALE, fixed(scaleRoll.value * fixedToNumber(THRUST_DUST_SCALE_JITTER)));
+
+    newEffects.push({
+      id,
+      kind: 'thrustDust',
+      ownerId: ship.id,
+      x: fixedAdd(tailX, fixedMul(perpCos, lateralOffset)),
+      y: fixedAdd(tailY, fixedMul(perpSin, lateralOffset)),
+      vx: fixedAdd(backwardVx, inheritedVx),
+      vy: fixedAdd(backwardVy, inheritedVy),
+      scale,
+      life: THRUST_DUST_LIFE,
+      maxLife: THRUST_DUST_LIFE,
+    });
+    id += 1;
+  }
+
+  return { effects: newEffects, nextEffectId: id, rngSeed: seed };
 }
 
 function stepShip(
@@ -184,14 +362,45 @@ function stepShip(
 
   ({ vx, vy } = applyPlanetGravity(vx, vy, x, y, state, input, activeSpec));
 
-  if ((input & InputBits.TurnLeft) !== 0) {
-    shipAngle = turn(shipAngle, -activeSpec.turnStep);
-    cannonAngle = turn(cannonAngle, -activeSpec.turnStep);
-  }
+  {
+    const turnLeft = (input & InputBits.TurnLeft) !== 0;
+    const turnRight = (input & InputBits.TurnRight) !== 0;
 
-  if ((input & InputBits.TurnRight) !== 0) {
-    shipAngle = turn(shipAngle, activeSpec.turnStep);
-    cannonAngle = turn(cannonAngle, activeSpec.turnStep);
+    let turnAccumulator = custom.turnAccumulator ?? (0 as Fixed);
+    if (turnLeft && !turnRight) {
+      turnAccumulator = (turnAccumulator - activeSpec.turnStep) as Fixed;
+    } else if (turnRight && !turnLeft) {
+      turnAccumulator = (turnAccumulator + activeSpec.turnStep) as Fixed;
+    } else {
+      turnAccumulator = 0 as Fixed;
+    }
+
+    const bodySteps = Math.trunc(turnAccumulator / FIXED_ONE);
+    if (bodySteps !== 0) {
+      shipAngle = turn(shipAngle, bodySteps);
+      turnAccumulator = (turnAccumulator - bodySteps * FIXED_ONE) as Fixed;
+    }
+    custom = { ...custom, turnAccumulator };
+
+    if (activeSpec.cannonTurnStep !== undefined) {
+      let cannonTurnAccumulator = custom.cannonTurnAccumulator ?? (0 as Fixed);
+      if (turnLeft && !turnRight) {
+        cannonTurnAccumulator = (cannonTurnAccumulator - activeSpec.cannonTurnStep) as Fixed;
+      } else if (turnRight && !turnLeft) {
+        cannonTurnAccumulator = (cannonTurnAccumulator + activeSpec.cannonTurnStep) as Fixed;
+      } else {
+        cannonTurnAccumulator = 0 as Fixed;
+      }
+
+      const cannonSteps = Math.trunc(cannonTurnAccumulator / FIXED_ONE);
+      if (cannonSteps !== 0) {
+        cannonAngle = turn(cannonAngle, cannonSteps);
+        cannonTurnAccumulator = (cannonTurnAccumulator - cannonSteps * FIXED_ONE) as Fixed;
+      }
+      custom = { ...custom, cannonTurnAccumulator };
+    } else if (bodySteps !== 0) {
+      cannonAngle = turn(cannonAngle, bodySteps);
+    }
   }
 
   if ((input & InputBits.Thrust) !== 0) {
@@ -433,7 +642,7 @@ function lerpWrappedFixed(from: Fixed, to: Fixed, max: Fixed, step: number, tota
   return wrapSignedFixed(fixedAdd(from, fixedMul(delta, t)), max);
 }
 
-function getActiveSpec(ship: ShipState, baseSpec: ShipSpec): ShipSpec {
+export function getActiveSpec(ship: ShipState, baseSpec: ShipSpec = getShipSpec(ship.shipId)): ShipSpec {
   if (ship.shipId !== 'krab' || !ship.custom.krabLongRange || !baseSpec.longRange) {
     return baseSpec;
   }
@@ -737,9 +946,12 @@ function firePrimary(
   const damageEffects: DamageEffect[] = [];
 
   if (ship.shipId === 'frog') {
+    if (primaryCooldown !== 0) {
+      return { actors, projectiles, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
+    }
     let charge = custom.frogCharge ?? 0;
-    let chargeTime = custom.frogChargeTime ?? 0;
-    if (primaryCooldown === 0 && chargeTime % FROG_CHARGE_INTERVAL === 0 && battery > 0 && charge < FROG_MAX_CHARGE) {
+    const chargeTime = custom.frogChargeTime ?? 0;
+    if (chargeTime % FROG_CHARGE_INTERVAL === 0 && battery > 0 && charge < FROG_MAX_CHARGE) {
       charge += 1;
       battery -= 1;
     }
@@ -1117,7 +1329,7 @@ function findProjectileHit(
   }
 
   for (const actor of actors) {
-    if (!actor.active || actor.ownerId === projectile.ownerId) {
+    if (!actor.active || actor.ownerId === projectile.ownerId || actor.attachedToShipId === projectile.ownerId) {
       continue;
     }
     const ship = ships[actor.attachedToShipId];

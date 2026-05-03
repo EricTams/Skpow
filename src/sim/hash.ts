@@ -1,9 +1,10 @@
-import type { ActorState, GameState, ProjectileState, ShipState } from './types';
+import type { ActorState, EffectState, GameState, ProjectileState, ShipState } from './types';
 
 export function hashState(state: GameState): number {
   let hash = 0x811c_9dc5;
   hash = mix(hash, state.frame);
   hash = mix(hash, state.nextProjectileId);
+  hash = mix(hash, state.nextEffectId);
   hash = mix(hash, state.rngSeed);
   hash = mix(hash, state.arena.width);
   hash = mix(hash, state.arena.height);
@@ -22,6 +23,10 @@ export function hashState(state: GameState): number {
 
   for (const projectile of state.projectiles) {
     hash = mixProjectile(hash, projectile);
+  }
+
+  for (const effect of state.effects) {
+    hash = mixEffect(hash, effect);
   }
 
   return hash >>> 0;
@@ -97,6 +102,21 @@ function mixProjectile(hash: number, projectile: ProjectileState): number {
   next = mix(next, projectile.trackPct);
   next = mix(next, projectile.variety);
   next = mix(next, projectile.active ? 1 : 0);
+  return next;
+}
+
+function mixEffect(hash: number, effect: EffectState): number {
+  let next = hash;
+  next = mix(next, effect.id);
+  next = mixString(next, effect.kind);
+  next = mix(next, effect.ownerId);
+  next = mix(next, effect.x);
+  next = mix(next, effect.y);
+  next = mix(next, effect.vx);
+  next = mix(next, effect.vy);
+  next = mix(next, effect.scale);
+  next = mix(next, effect.life);
+  next = mix(next, effect.maxLife);
   return next;
 }
 

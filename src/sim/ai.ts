@@ -13,6 +13,9 @@ const ZIZLIK_FIRE_X_TOLERANCE = 50;
 const FIRE_ANGLE_TOLERANCE_STEPS = Math.ceil((0.15 / (Math.PI * 2)) * ANGLE_STEPS);
 const CANNONADE_FIRE_TOLERANCE_STEPS = Math.ceil((0.05 / (Math.PI * 2)) * ANGLE_STEPS);
 const CANNONADE_SPECIAL_MAX_DISTANCE = 1100;
+const KRON_SPECIAL_NEAR_RANGE = 400;
+const KRON_SPECIAL_AIM_DOT = 0.5;
+const KRON_SPECIAL_RECEDING_SPEED = 0.05;
 const AI_PURSUIT_MIN_FRAMES = 3 * 60;
 const AI_PURSUIT_FRAME_RANGE = 3 * 60;
 const AI_EVADE_MIN_FRAMES = Math.round(0.5 * 60);
@@ -44,13 +47,17 @@ export function getAiInput(state: GameState, playerId: number): number {
   const leadFrames = directAim.distance < shotDistance * CLOSE_SHOT_DISTANCE_RATIO ? closeLeadFrames : pursuitLeadFrames;
   const aim = getAimSolution(ship, enemy, state, leadRatio * leadFrames);
   const shotAim = getAimSolution(ship, enemy, state, leadRatio * closeLeadFrames);
-  const aimingAngle = ship.shipId === 'cannonade' ? (ship.custom.cannonAngle ?? ship.angle) : ship.angle;
+  const cannonAngle = ship.custom.cannonAngle ?? ship.angle;
+  const fireReferenceAngle = ship.shipId === 'cannonade' ? cannonAngle : ship.angle;
   const movementMode = getAiMovementMode(state, playerId);
   const movementAim = getMovementAim(aim, movementMode);
-  const steeringAim = getPlanetAvoidanceAim(ship, state, movementAim) ?? movementAim.targetAngle;
+  const planetAvoidanceAim = getPlanetAvoidanceAim(ship, state, movementAim);
+  const steeringAim = planetAvoidanceAim ?? movementAim.targetAngle;
+  const turnReferenceAngle =
+    ship.shipId === 'cannonade' && planetAvoidanceAim === null ? cannonAngle : ship.angle;
 
   let input = InputBits.Thrust;
-  const turnDelta = getSignedAngleDelta(aimingAngle, steeringAim);
+  const turnDelta = getSignedAngleDelta(turnReferenceAngle, steeringAim);
   if (turnDelta > 0) {
     input |= InputBits.TurnRight;
   } else if (turnDelta < 0) {
@@ -58,12 +65,15 @@ export function getAiInput(state: GameState, playerId: number): number {
   }
 
   const shotTolerance = ship.shipId === 'cannonade' ? CANNONADE_FIRE_TOLERANCE_STEPS : FIRE_ANGLE_TOLERANCE_STEPS;
-  const shotDelta = Math.abs(getSignedAngleDelta(aimingAngle, shotAim.targetAngle));
+  const shotDelta = Math.abs(getSignedAngleDelta(fireReferenceAngle, shotAim.targetAngle));
   const canAffordPrimary = ship.battery >= getShipSpec(ship.shipId).primary.cost;
+  const inFiringPosition = shotAim.distance < shotDistance && shotDelta <= shotTolerance;
   const shouldFirePrimary =
     ship.shipId === 'zizlik'
       ? shouldZizlikFire(ship, enemy, state)
-      : shotAim.distance < shotDistance && shotDelta <= shotTolerance;
+      : ship.shipId === 'frog'
+        ? shouldFrogHoldFire(ship, inFiringPosition)
+        : inFiringPosition;
   if (shouldFirePrimary && canAffordPrimary) {
     input |= InputBits.FirePrimary;
   }
@@ -156,6 +166,14 @@ function unitHash(playerId: number, cycle: number, salt: number): number {
 function shouldZizlikFire(ship: ShipState, enemy: ShipState, state: GameState): boolean {
   const aim = getAimSolution(ship, enemy, state, getShotLeadFrames(ship));
   return Math.abs(aim.dx) < ZIZLIK_FIRE_X_TOLERANCE && aim.distance < getShotDistance(ship);
+}
+
+function shouldFrogHoldFire(ship: ShipState, inFiringPosition: boolean): boolean {
+  const charge = ship.custom.frogCharge ?? 0;
+  if (inFiringPosition && charge > 0) {
+    return false;
+  }
+  return true;
 }
 
 function getPlanetAvoidanceAim(ship: ShipState, state: GameState, pursuitAim: AimSolution): Angle | null {
@@ -285,7 +303,7 @@ function shouldUseSpecial(ship: ShipState, enemy: ShipState, distance: number, s
     case 'voskum':
       return distance < 400 && ship.crew < enemy.crew;
     case 'kron':
-      return distance < 400 && enemy.freezeFrames === 0;
+      return shouldKronUseSpecial(ship, enemy, distance, state);
     case 'gooj':
       return distance < 500;
     case 'krab': {
@@ -297,6 +315,37 @@ function shouldUseSpecial(ship: ShipState, enemy: ShipState, distance: number, s
     default:
       return false;
   }
+}
+
+function shouldKronUseSpecial(ship: ShipState, enemy: ShipState, distance: number, state: GameState): boolean {
+  if (enemy.freezeFrames > 0) {
+    return false;
+  }
+
+  const dx = getWrappedDelta(fixedToNumber(enemy.x) - fixedToNumber(ship.x), fixedToNumber(state.arena.width));
+  const dy = getWrappedDelta(fixedToNumber(enemy.y) - fixedToNumber(ship.y), fixedToNumber(state.arena.height));
+  const length = Math.hypot(dx, dy);
+  if (length === 0) {
+    return false;
+  }
+
+  const dirX = dx / length;
+  const dirY = dy / length;
+
+  const closingSpeed = fixedToNumber(ship.vx) * dirX + fixedToNumber(ship.vy) * dirY;
+  const movingAway = closingSpeed < -KRON_SPECIAL_RECEDING_SPEED;
+
+  const facingRadians = angleToRadians(ship.angle);
+  const aimDot = Math.cos(facingRadians) * dirX + Math.sin(facingRadians) * dirY;
+  const wellAimed = aimDot >= KRON_SPECIAL_AIM_DOT;
+
+  const inRange = distance < KRON_SPECIAL_NEAR_RANGE;
+
+  if (!inRange && movingAway) {
+    return false;
+  }
+
+  return inRange && wellAimed;
 }
 
 function shouldPScoutUseSpecial(ship: ShipState, enemy: ShipState, state: GameState): boolean {

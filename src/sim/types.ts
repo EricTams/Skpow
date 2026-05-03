@@ -47,6 +47,8 @@ export interface ShipCustomState {
   readonly voskumTeleportFromX?: Fixed;
   readonly voskumTeleportFromY?: Fixed;
   readonly voskumTeleportAngles?: readonly Angle[];
+  readonly turnAccumulator?: Fixed;
+  readonly cannonTurnAccumulator?: Fixed;
 }
 
 export type ActorKind = 'zizlikNode' | 'goojBackNode' | 'pscoutBeacon';
@@ -63,6 +65,21 @@ export interface ActorState {
   readonly radius: Fixed;
   readonly ttl: number | null;
   readonly active: boolean;
+}
+
+export type EffectKind = 'shipExplosion' | 'thrustDust';
+
+export interface EffectState {
+  readonly id: number;
+  readonly kind: EffectKind;
+  readonly ownerId: number;
+  readonly x: Fixed;
+  readonly y: Fixed;
+  readonly vx: Fixed;
+  readonly vy: Fixed;
+  readonly scale: Fixed;
+  readonly life: number;
+  readonly maxLife: number;
 }
 
 export interface ProjectileState {
@@ -99,10 +116,12 @@ export interface GameState {
   readonly ships: readonly ShipState[];
   readonly actors: readonly ActorState[];
   readonly projectiles: readonly ProjectileState[];
+  readonly effects: readonly EffectState[];
   readonly planet: PlanetState;
   readonly arena: ArenaState;
   readonly nextProjectileId: number;
   readonly nextActorId: number;
+  readonly nextEffectId: number;
   readonly rngSeed: RngSeed;
   readonly winnerId: number | null;
 }

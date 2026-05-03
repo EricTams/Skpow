@@ -109,6 +109,10 @@ export class NetworkMatchSession {
   private sessionReadyReceived = false;
   private sessionReadyAckSent = false;
   private sessionReadyAckReceived = false;
+  // Latest thrust intent reported by the remote owner. Used to spawn matching
+  // thrust dust visuals locally, since the remote ship's input is otherwise 0
+  // on this machine.
+  private remoteThrusting = false;
 
   public constructor(
     private readonly role: ConnectionRole,
@@ -206,8 +210,9 @@ export class NetworkMatchSession {
     }
 
     const previousState = this.ownerSession.currentState;
-    const result = this.ownerSession.step(localInput);
-    this.queueOwnerState(result.state);
+    const remoteInput = this.remoteThrusting ? InputBits.Thrust : 0;
+    const result = this.ownerSession.step(localInput, remoteInput);
+    this.queueOwnerState(result.state, localInput);
     this.queueProjectileSpawns(previousState, result.state);
     this.queueWeaponEvents(previousState, result.state, localInput);
     this.queueDefenderHits(previousState, result.state);
@@ -288,6 +293,7 @@ export class NetworkMatchSession {
     this.lastDefenderHitFrame = null;
     this.recovery = null;
     this.lastCompletedRecoveryId = 0;
+    this.remoteThrusting = false;
     this.resetOwnerFactWindows();
   }
 
@@ -388,6 +394,9 @@ export class NetworkMatchSession {
     }
 
     const accepted = this.ownerSession.applyOwnerShipState(packet.ship, packet.frame);
+    if (accepted) {
+      this.remoteThrusting = packet.thrusting === true;
+    }
     this.lastOwnerStateFrame = accepted ? Math.max(this.lastOwnerStateFrame ?? packet.frame, packet.frame) : this.lastOwnerStateFrame;
     this.sessionError = accepted ? null : 'Ignored invalid owner state packet.';
   }
@@ -700,13 +709,21 @@ export class NetworkMatchSession {
     this.processedWeaponEventIds.clear();
   }
 
-  private queueOwnerState(state: GameState): void {
+  private queueOwnerState(state: GameState, localInput: number): void {
     const ship = state.ships[this.localPlayerIndex];
     if (!ship) {
       return;
     }
 
-    this.outgoingPackets.push(encodeOwnerStatePacket({ roundId: this.activeRoundId, frame: state.frame, playerId: this.localPlayerIndex, ship }));
+    this.outgoingPackets.push(
+      encodeOwnerStatePacket({
+        roundId: this.activeRoundId,
+        frame: state.frame,
+        playerId: this.localPlayerIndex,
+        ship,
+        thrusting: (localInput & InputBits.Thrust) !== 0,
+      }),
+    );
   }
 
   private queueProjectileSpawns(previousState: GameState, nextState: GameState): void {
