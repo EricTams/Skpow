@@ -1,11 +1,11 @@
 import {
+  get,
   off,
   onDisconnect,
   onValue,
   push,
   ref,
   remove,
-  runTransaction,
   serverTimestamp,
   set,
   update,
@@ -13,9 +13,16 @@ import {
   type Database,
 } from 'firebase/database';
 
+export type LobbyKind = 'standard' | 'dev';
+
 export interface LobbySettings {
   readonly pointTotal: number;
   readonly draftMode: 'open';
+  readonly kind?: LobbyKind;
+}
+
+export function getLobbyKind(lobby: LobbyRecord): LobbyKind {
+  return lobby.settings.kind ?? 'standard';
 }
 
 export interface LobbyRecord {
@@ -34,6 +41,25 @@ export interface CandidateRecord {
   readonly candidate: RTCIceCandidateInit;
   readonly createdAt: number | object;
 }
+
+export type ClaimAbortReason =
+  | 'lobby-missing'
+  | 'lobby-not-open'
+  | 'lobby-expired'
+  | 'already-claimed'
+  | 'rules-rejected'
+  | 'race-lost'
+  | 'transaction-error';
+
+export type ClaimLobbyResult =
+  | { readonly success: true }
+  | {
+      readonly success: false;
+      readonly reason: ClaimAbortReason;
+      readonly detail?: string;
+      readonly observedLobby?: Omit<LobbyRecord, 'id'> | null;
+      readonly committedSnapshot?: Omit<LobbyRecord, 'id'> | null;
+    };
 
 export class LobbyRepository {
   public constructor(private readonly database: Database) {}
@@ -75,31 +101,67 @@ export class LobbyRepository {
     await remove(ref(this.database, `lobbies/${lobbyId}`));
   }
 
-  public async claimLobby(lobbyId: string, joinerUid: string): Promise<boolean> {
+  public async claimLobby(lobbyId: string, joinerUid: string): Promise<ClaimLobbyResult> {
     const lobbyRef = ref(this.database, `lobbies/${lobbyId}`);
-    const result = await runTransaction(lobbyRef, (currentLobby: Omit<LobbyRecord, 'id'> | null) => {
-      if (
-        currentLobby &&
-        currentLobby.status === 'open' &&
-        currentLobby.expiresAt > Date.now() &&
-        !currentLobby.joinerUid
-      ) {
-        return {
-          ...currentLobby,
-          joinerUid,
-          status: 'connecting',
-        };
-      }
 
-      return undefined;
-    });
-
-    const claimedLobby = result.snapshot.val() as Omit<LobbyRecord, 'id'> | null;
-    if (!result.committed || claimedLobby?.joinerUid !== joinerUid) {
-      return false;
+    // Fetch the lobby state from the server directly. Avoids runTransaction's
+    // optimistic-cache behaviour, which silently cancels the transaction (no
+    // retry) when the local per-child cache is cold and the update fn returns
+    // undefined.
+    let snapshotExists: boolean;
+    let observedLobby: Omit<LobbyRecord, 'id'> | null;
+    try {
+      const snapshot = await get(lobbyRef);
+      snapshotExists = snapshot.exists();
+      observedLobby = snapshotExists ? (snapshot.val() as Omit<LobbyRecord, 'id'>) : null;
+    } catch (error) {
+      return {
+        success: false,
+        reason: 'transaction-error',
+        detail: `get failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
     }
 
-    return true;
+    if (!observedLobby) {
+      return {
+        success: false,
+        reason: 'lobby-missing',
+        detail: `get returned exists=${snapshotExists}`,
+        observedLobby: null,
+      };
+    }
+    if (observedLobby.status !== 'open') {
+      return { success: false, reason: 'lobby-not-open', observedLobby };
+    }
+    if (observedLobby.expiresAt <= Date.now()) {
+      return { success: false, reason: 'lobby-expired', observedLobby };
+    }
+    if (observedLobby.joinerUid) {
+      return { success: false, reason: 'already-claimed', observedLobby };
+    }
+
+    // Atomic claim via a partial update. Firebase rules require:
+    //   data.status === 'open' && !data.joinerUid &&
+    //   newData.status === 'connecting' && newData.joinerUid === auth.uid &&
+    //   newData.hostUid === data.hostUid
+    // so a server-side race against another joiner causes update() to throw
+    // PERMISSION_DENIED rather than silently corrupting the lobby.
+    try {
+      await update(lobbyRef, {
+        joinerUid,
+        status: 'connecting',
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return {
+        success: false,
+        reason: detail.includes('PERMISSION_DENIED') ? 'race-lost' : 'transaction-error',
+        detail,
+        observedLobby,
+      };
+    }
+
+    return { success: true };
   }
 
   public async setOffer(lobbyId: string, offer: RTCSessionDescriptionInit): Promise<void> {

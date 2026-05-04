@@ -3,7 +3,7 @@ import './style.css';
 import { bindKeyboard, readInputDeviceStatus, readLocalInputs, readPrimaryLocalInput } from './input';
 import { createFixedLoop, SIM_FPS } from './loop';
 import { getFirebaseClient, isFirebaseConfigured, observeAnonymousUser, signInWithAnonymousAuth } from './net/firebase';
-import { LobbyRepository, type LobbyRecord } from './net/lobby';
+import { getLobbyKind, LobbyRepository, type LobbyKind, type LobbyRecord } from './net/lobby';
 import { NetworkMatchSession, type NetworkMatchStatus } from './net/matchSession';
 import { formatPeerStatus } from './net/peerStatus';
 import { GameplayPacketType } from './net/protocol';
@@ -27,6 +27,8 @@ if (!app) {
 const BUDGET_PRESETS = [100, 150, 200] as const;
 const AI_DEMO_ROUND_FRAMES = 30 * SIM_FPS;
 const NETWORK_CORRECTION_BLEND_FRAMES = 5;
+const LAGGY_MP_BUDGET = 100;
+const LAGGY_MP_FIND_TIMEOUT_MS = 1500;
 
 interface FleetShip {
   readonly uid: string;
@@ -86,6 +88,7 @@ let currentLoadout: MatchLoadout = DEFAULT_MATCH_SHIPS;
 let currentUid: string | null = null;
 let lobbies: readonly LobbyRecord[] = [];
 let peerSession: PeerConnectionSession | null = null;
+let currentHostLobbyId: string | null = null;
 let peerConnectionState: ConnectionState = 'idle';
 let networkMatch: NetworkMatchSession | null = null;
 let networkMatchStatus: NetworkMatchStatus | null = null;
@@ -104,6 +107,9 @@ let networkDebugSettings: NetworkDebugSettings = {
   aiJoiner: false,
 };
 let presentationCorrection: PresentationCorrection | null = null;
+let suppressPeerDisconnectPopup = false;
+let pauseMenuOpen = false;
+let lastRenderedPhaseName: AppPhase['name'] | null = null;
 const pendingGameplayTimers = new Set<number>();
 const MP_AI_IMPAIRMENT_DEFAULTS: PacketImpairmentSettings = { delayMs: 100, jitterMs: 50, dropPct: 3 };
 
@@ -114,10 +120,29 @@ app.innerHTML = `
       <div class="arena-frame">
         <canvas class="game-canvas" data-game-canvas aria-label="SkPow prototype arena"></canvas>
         <div class="menu-overlay" data-menu-overlay></div>
+        <div class="arena-hint arena-hint-hidden" data-arena-hint aria-live="polite"></div>
         <div class="network-recovery-overlay network-recovery-overlay-hidden" data-network-recovery-overlay aria-live="polite">
           <div class="network-recovery-card">
             <h2>Resyncing Network Match</h2>
             <p data-network-recovery-message>Waiting for peer snapshot...</p>
+          </div>
+        </div>
+        <div class="pause-overlay pause-overlay-hidden" data-pause-overlay role="dialog" aria-modal="true" aria-labelledby="pause-title">
+          <div class="pause-card">
+            <h2 id="pause-title">Menu</h2>
+            <div class="menu-actions">
+              <button type="button" data-pause-resume>Resume</button>
+              <button type="button" data-pause-quit>Quit to Main Menu</button>
+            </div>
+          </div>
+        </div>
+        <div class="popup-overlay popup-overlay-hidden" data-popup-overlay role="dialog" aria-modal="true" aria-labelledby="popup-title" aria-live="assertive">
+          <div class="popup-card">
+            <h2 id="popup-title" data-popup-title>Notice</h2>
+            <p data-popup-message></p>
+            <div class="menu-actions">
+              <button type="button" data-popup-dismiss>OK</button>
+            </div>
           </div>
         </div>
       </div>
@@ -154,14 +179,13 @@ app.innerHTML = `
           <button type="button" data-send-control>Send control ping</button>
           <button type="button" data-close-peer>Close peer</button>
         </div>
-        <label class="checkbox-row">
-          <input type="checkbox" data-mp-ai-host />
-          MP AI host
-        </label>
-        <label class="checkbox-row">
-          <input type="checkbox" data-mp-ai-joiner />
-          MP AI joiner
-        </label>
+        <div class="button-row">
+          <button type="button" data-laggy-mp-host>Laggy MP Host</button>
+          <button type="button" data-laggy-mp-client>Laggy MP Client</button>
+        </div>
+        <p class="dev-helper-text">
+          Laggy MP creates a separate dev lobby with AI input on both sides and packet impairment enabled. Dev lobbies do not appear in the standard multiplayer browser.
+        </p>
         <div class="network-debug-grid">
           <fieldset>
             <legend>Local outgoing fake lag</legend>
@@ -185,6 +209,14 @@ const arenaFrame = requiredElement<HTMLElement>('.arena-frame');
 const menuOverlay = requiredElement<HTMLElement>('[data-menu-overlay]');
 const networkRecoveryOverlay = requiredElement<HTMLElement>('[data-network-recovery-overlay]');
 const networkRecoveryMessage = requiredElement<HTMLElement>('[data-network-recovery-message]');
+const arenaHint = requiredElement<HTMLElement>('[data-arena-hint]');
+const popupOverlay = requiredElement<HTMLElement>('[data-popup-overlay]');
+const popupTitle = requiredElement<HTMLElement>('[data-popup-title]');
+const popupMessage = requiredElement<HTMLElement>('[data-popup-message]');
+const popupDismissButton = requiredElement<HTMLButtonElement>('[data-popup-dismiss]');
+const pauseOverlay = requiredElement<HTMLElement>('[data-pause-overlay]');
+const pauseResumeButton = requiredElement<HTMLButtonElement>('[data-pause-resume]');
+const pauseQuitButton = requiredElement<HTMLButtonElement>('[data-pause-quit]');
 const gameStatus = requiredElement<HTMLElement>('[data-game-status]');
 const matchStatus = requiredElement<HTMLElement>('[data-match-status]');
 const inputStatus = requiredElement<HTMLElement>('[data-input-status]');
@@ -198,8 +230,8 @@ const createLobbyButton = requiredElement<HTMLButtonElement>('[data-create-lobby
 const sendControlButton = requiredElement<HTMLButtonElement>('[data-send-control]');
 const closePeerButton = requiredElement<HTMLButtonElement>('[data-close-peer]');
 const showOwnLobbiesCheckbox = requiredElement<HTMLInputElement>('[data-show-own-lobbies]');
-const mpAiHostCheckbox = requiredElement<HTMLInputElement>('[data-mp-ai-host]');
-const mpAiJoinerCheckbox = requiredElement<HTMLInputElement>('[data-mp-ai-joiner]');
+const laggyMpHostButton = requiredElement<HTMLButtonElement>('[data-laggy-mp-host]');
+const laggyMpClientButton = requiredElement<HTMLButtonElement>('[data-laggy-mp-client]');
 const fakeLagInputs = Array.from(document.querySelectorAll<HTMLInputElement>('[data-fake-lag-field]'));
 const hudContainers = Array.from(document.querySelectorAll<HTMLElement>('[data-player-hud]'));
 
@@ -225,15 +257,26 @@ const cleanupKeyboard = bindKeyboard({
 });
 window.addEventListener('beforeunload', cleanupKeyboard);
 window.addEventListener('keydown', (event) => {
-  if (event.code === 'Escape' && appPhase.name === 'aiDemo') {
-    appPhase = { name: 'mainMenu' };
-    renderMenu();
+  if (event.code !== 'Escape') {
+    return;
+  }
+
+  if (!popupOverlay.classList.contains('popup-overlay-hidden')) {
+    hidePopup();
+    return;
+  }
+
+  if (isPauseMenuAvailable()) {
+    togglePauseMenu();
   }
 });
 
 createFixedLoop(
   () => {
     if (appPhase.name === 'fighting') {
+      if (pauseMenuOpen) {
+        return;
+      }
       const localInputs = readLocalInputs();
       state = stepGame(state, [localInputs[0], getAiInput(state, 1)]);
       trackDamage(state);
@@ -250,6 +293,9 @@ createFixedLoop(
     }
 
     if (appPhase.name === 'aiDemo') {
+      if (pauseMenuOpen) {
+        return;
+      }
       state = stepGame(state, [getAiInput(state, 0), getAiInput(state, 1)]);
       trackDamage(state);
       if (hasActiveShipExplosion(state)) {
@@ -509,6 +555,10 @@ function easeOutCubic(value: number): number {
 }
 
 function readNetworkLocalInput(): number {
+  if (pauseMenuOpen) {
+    return 0;
+  }
+
   if (!networkMatch) {
     return readPrimaryLocalInput();
   }
@@ -550,7 +600,7 @@ function startNextNetworkAiRound(): void {
   sendGameplayPackets(networkMatch.takeOutgoingPackets());
   updatePeerStatus();
   log(
-    `Network AI round ${networkAiRound + 1}: ${getShipCatalogEntry(currentLoadout[0]).name} vs ${getShipCatalogEntry(currentLoadout[1]).name}`,
+    `Laggy MP round ${networkAiRound + 1}: ${getShipCatalogEntry(currentLoadout[0]).name} vs ${getShipCatalogEntry(currentLoadout[1]).name}`,
   );
 }
 
@@ -574,16 +624,31 @@ if (!isFirebaseConfigured() || !firebase || !lobbyRepository) {
   firebaseStatus.textContent = 'Firebase env values are missing. Local prototype is still playable.';
   signInButton.disabled = true;
   createLobbyButton.disabled = true;
+  laggyMpHostButton.disabled = true;
+  laggyMpClientButton.disabled = true;
 } else {
-  firebaseStatus.textContent = 'Firebase configured. Sign in to create or join lobbies.';
+  firebaseStatus.textContent = 'Firebase configured. Signing in anonymously...';
   createLobbyButton.disabled = true;
+  laggyMpHostButton.disabled = true;
+  laggyMpClientButton.disabled = true;
   observeAnonymousUser((user) => {
     currentUid = user?.uid ?? null;
-    createLobbyButton.disabled = !currentUid;
-    firebaseStatus.textContent = currentUid ? `Signed in anonymously: ${currentUid}` : 'Not signed in.';
+    const signedIn = currentUid !== null;
+    createLobbyButton.disabled = !signedIn;
+    laggyMpHostButton.disabled = !signedIn;
+    laggyMpClientButton.disabled = !signedIn;
+    firebaseStatus.textContent = currentUid
+      ? `Signed in anonymously: ${currentUid}`
+      : 'Not signed in. Tap "Sign In Anonymously" to retry.';
     updateLobbyObserver();
     renderLobbies();
     renderMenu();
+  });
+  // Kick off anonymous sign-in automatically so multiplayer is ready without an extra
+  // tap in the dev panel. The observer above will fire once the auth completes.
+  void signInWithAnonymousAuth().catch((error) => {
+    log(`Auto sign-in failed: ${readError(error)}`);
+    firebaseStatus.textContent = 'Auto sign-in failed. Tap "Sign In Anonymously" to retry.';
   });
 }
 
@@ -596,6 +661,30 @@ menuOverlay.addEventListener('click', (event) => {
   handleMenuAction(button);
 });
 
+popupDismissButton.addEventListener('click', () => {
+  hidePopup();
+});
+
+popupOverlay.addEventListener('click', (event) => {
+  if (event.target === popupOverlay) {
+    hidePopup();
+  }
+});
+
+pauseResumeButton.addEventListener('click', () => {
+  closePauseMenu();
+});
+
+pauseQuitButton.addEventListener('click', () => {
+  quitToMainMenu();
+});
+
+pauseOverlay.addEventListener('click', (event) => {
+  if (event.target === pauseOverlay) {
+    closePauseMenu();
+  }
+});
+
 signInButton.addEventListener('click', () => {
   void signInWithAnonymousAuth().catch((error) => log(`Anonymous auth failed: ${readError(error)}`));
 });
@@ -605,6 +694,7 @@ createLobbyButton.addEventListener('click', () => {
     return;
   }
 
+  clearAiOverrides();
   void createHostLobby(currentUid, lobbyRepository, 100);
 });
 
@@ -624,31 +714,12 @@ showOwnLobbiesCheckbox.addEventListener('change', () => {
   renderMenu();
 });
 
-mpAiHostCheckbox.addEventListener('change', () => {
-  networkDebugSettings = { ...networkDebugSettings, aiHost: mpAiHostCheckbox.checked };
-  maybeApplyMpAiImpairmentDefaults(mpAiHostCheckbox.checked);
-  if (
-    mpAiHostCheckbox.checked &&
-    appPhase.name === 'networkFleetBuild' &&
-    appPhase.role === 'host' &&
-    !networkMatch &&
-    peerConnectionState === 'connected'
-  ) {
-    startNetworkMatchWhenReady('host', appPhase.budget, appPhase.lobbyId);
-  }
+laggyMpHostButton.addEventListener('click', () => {
+  void startLaggyMpHost();
 });
 
-mpAiJoinerCheckbox.addEventListener('change', () => {
-  networkDebugSettings = { ...networkDebugSettings, aiJoiner: mpAiJoinerCheckbox.checked };
-  maybeApplyMpAiImpairmentDefaults(mpAiJoinerCheckbox.checked);
-  if (
-    mpAiJoinerCheckbox.checked &&
-    appPhase.name === 'networkFleetBuild' &&
-    appPhase.role === 'joiner' &&
-    !networkMatch
-  ) {
-    autoReadyAiJoiner(appPhase.budget, appPhase.lobbyId);
-  }
+laggyMpClientButton.addEventListener('click', () => {
+  void startLaggyMpClient();
 });
 
 for (const input of fakeLagInputs) {
@@ -672,10 +743,9 @@ function handleMenuAction(button: HTMLButtonElement): void {
     case 'sign-in':
       void signInWithAnonymousAuth().catch((error) => log(`Anonymous auth failed: ${readError(error)}`));
       return;
-    case 'back-main':
-      closePeer();
-      appPhase = { name: 'mainMenu' };
-      break;
+    case 'back':
+      goBack();
+      return;
     case 'choose-budget':
       appPhase = { name: 'fleetBuild', budget: readBudget(button), fleet: [] };
       break;
@@ -699,19 +769,19 @@ function handleMenuAction(button: HTMLButtonElement): void {
       continueAfterRound();
       return;
     case 'final-main':
-      closePeer();
-      currentLoadout = DEFAULT_MATCH_SHIPS;
-      state = createInitialState(undefined, currentLoadout);
-      renderer.setShipLoadout(currentLoadout);
-      renderHud(currentLoadout);
-      appPhase = { name: 'mainMenu' };
-      break;
+      quitToMainMenu();
+      return;
     case 'multi-host':
+      if (!ensureMultiplayerReady('Cannot create a hosted lobby right now.')) {
+        return;
+      }
       appPhase = { name: 'hostSetup' };
       break;
     case 'multi-join':
+      if (!ensureMultiplayerReady('Cannot browse hosted lobbies right now.')) {
+        return;
+      }
       appPhase = { name: 'lobbyBrowser' };
-      updateLobbyObserver();
       break;
     case 'host-lobby':
       void hostLobbyFromMenu(readBudget(button));
@@ -725,11 +795,21 @@ function handleMenuAction(button: HTMLButtonElement): void {
 }
 
 function renderMenu(): void {
+  if (lastRenderedPhaseName !== null && lastRenderedPhaseName !== appPhase.name) {
+    closePauseMenu();
+  }
+  if (!isPauseMenuAvailable()) {
+    closePauseMenu();
+  }
+  lastRenderedPhaseName = appPhase.name;
+
   const combatPhase = isCombatPhase();
   legacyScreen.classList.toggle('legacy-screen-menu-active', !combatPhase);
   arenaFrame.classList.toggle('arena-frame-menu-active', !combatPhase);
   menuOverlay.classList.toggle('menu-overlay-hidden', combatPhase);
   updateNetworkRecoveryOverlay();
+  updateArenaHint();
+  updateLobbyObserver();
 
   switch (appPhase.name) {
     case 'loading':
@@ -739,7 +819,12 @@ function renderMenu(): void {
       menuOverlay.innerHTML = renderMainMenu();
       break;
     case 'singleBudget':
-      menuOverlay.innerHTML = renderBudgetMenu('Build Single Player Fleet', 'choose-budget', 'Pick a point budget for your side.');
+      menuOverlay.innerHTML = renderBudgetMenu(
+        'Build Single Player Fleet',
+        'choose-budget',
+        'Pick a point budget for your side.',
+        '<button type="button" data-action="back">Back</button>',
+      );
       break;
     case 'fleetBuild':
       menuOverlay.innerHTML = renderFleetBuildMenu(appPhase);
@@ -757,7 +842,12 @@ function renderMenu(): void {
       menuOverlay.innerHTML = renderMultiplayerMenu();
       break;
     case 'hostSetup':
-      menuOverlay.innerHTML = renderBudgetMenu('Create Hosted Lobby', 'host-lobby', 'Choose the point budget advertised to joiners.');
+      menuOverlay.innerHTML = renderBudgetMenu(
+        'Create Hosted Lobby',
+        'host-lobby',
+        'Choose the point budget advertised to joiners.',
+        '<button type="button" data-action="back">Back</button>',
+      );
       break;
     case 'lobbyBrowser':
       menuOverlay.innerHTML = renderLobbyBrowserMenu();
@@ -805,14 +895,14 @@ function renderMainMenu(): string {
       <p>Build a fleet, pick your next ship, and fight until one side is out of ships.</p>
       <div class="menu-actions">
         <button type="button" data-action="main-single">Single Player</button>
-        <button type="button" data-action="main-ai-demo">AI vs AI Test</button>
+        <button type="button" data-action="main-ai-demo">Attract Mode</button>
         <button type="button" data-action="main-multi">Multiplayer</button>
       </div>
     </section>
   `;
 }
 
-function renderBudgetMenu(title: string, action: string, detail: string): string {
+function renderBudgetMenu(title: string, action: string, detail: string, backButton: string = ''): string {
   return `
     <section class="menu-card">
       ${renderMenuBrand()}
@@ -828,7 +918,7 @@ function renderBudgetMenu(title: string, action: string, detail: string): string
       </label>
       <div class="menu-actions">
         <button type="button" data-action="${action}" data-budget-source="custom">Use Custom Budget</button>
-        <button type="button" data-action="back-main">Back</button>
+        ${backButton}
       </div>
     </section>
   `;
@@ -852,7 +942,7 @@ function renderFleetBuildMenu(phase: Extract<AppPhase, { readonly name: 'fleetBu
       </div>
       <div class="menu-actions">
         <button type="button" data-action="fleet-ready" ${phase.fleet.length === 0 ? 'disabled' : ''}>Ready</button>
-        <button type="button" data-action="back-main">Back</button>
+        <button type="button" data-action="back">${isNetwork ? 'Leave Match' : 'Back'}</button>
       </div>
     </section>
   `;
@@ -945,14 +1035,14 @@ function renderMultiplayerMenu(): string {
         ${currentUid ? '' : '<button type="button" data-action="sign-in">Sign In Anonymously</button>'}
         <button type="button" data-action="multi-host">Create Hosted Lobby</button>
         <button type="button" data-action="multi-join">Join Hosted Lobby</button>
-        <button type="button" data-action="back-main">Back</button>
+        <button type="button" data-action="back">Back</button>
       </div>
     </section>
   `;
 }
 
 function renderLobbyBrowserMenu(): string {
-  const visibleLobbies = getVisibleLobbies();
+  const visibleLobbies = getStandardMenuLobbies();
   const authText = currentUid ? 'Choose an open lobby.' : 'Sign in anonymously before joining a lobby.';
   return `
     <section class="menu-card menu-card-wide">
@@ -965,7 +1055,7 @@ function renderLobbyBrowserMenu(): string {
       </div>
       <div class="menu-actions">
         ${currentUid ? '' : '<button type="button" data-action="sign-in">Sign In Anonymously</button>'}
-        <button type="button" data-action="back-main">Back</button>
+        <button type="button" data-action="back">Back</button>
       </div>
     </section>
   `;
@@ -981,6 +1071,57 @@ function renderMenuLobbyRow(lobby: LobbyRecord): string {
   `;
 }
 
+function pickJoinableDevLobby(openLobbies: readonly LobbyRecord[]): LobbyRecord | null {
+  const candidates = openLobbies.filter((lobby) => {
+    if (getLobbyKind(lobby) !== 'dev' || lobby.status !== 'open' || lobby.expiresAt <= Date.now()) {
+      return false;
+    }
+    // Skip the lobby this same window is currently hosting (cross-window same-browser
+    // testing in incognito uses a different UID, but a single window must not join
+    // itself).
+    if (currentHostLobbyId === lobby.id) {
+      return false;
+    }
+    return true;
+  });
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  // Prefer the freshest lobby. Stale dev lobbies abandoned via the Escape menu can
+  // sit in Firebase up to ~5 minutes; without this preference we'd pick the orphan
+  // over the host the user just spun up.
+  return candidates.reduce((newest, current) =>
+    current.expiresAt > newest.expiresAt ? current : newest,
+  );
+}
+
+function findDevLobby(repository: LobbyRepository, timeoutMs: number): Promise<LobbyRecord | null> {
+  return new Promise((resolve) => {
+    let resolved = false;
+    let cleanup: (() => void) | null = null;
+
+    const finalize = (lobby: LobbyRecord | null): void => {
+      if (resolved) {
+        return;
+      }
+      resolved = true;
+      cleanup?.();
+      window.clearTimeout(timeoutId);
+      resolve(lobby);
+    };
+
+    const timeoutId = window.setTimeout(() => finalize(null), timeoutMs);
+
+    cleanup = repository.observeOpenLobbies((openLobbies) => {
+      const match = pickJoinableDevLobby(openLobbies);
+      if (match) {
+        finalize(match);
+      }
+    });
+  });
+}
+
 function renderNetworkConnectingMenu(phase: Extract<AppPhase, { readonly name: 'networkConnecting' }>): string {
   return `
     <section class="menu-card">
@@ -989,7 +1130,7 @@ function renderNetworkConnectingMenu(phase: Extract<AppPhase, { readonly name: '
       <h2>${phase.role === 'host' ? 'Waiting For Joiner' : 'Joining Lobby'}</h2>
       <p>Lobby ${phase.lobbyId} | ${phase.budget} pts | Peer ${peerConnectionState}</p>
       <div class="menu-actions">
-        <button type="button" data-action="back-main">Cancel</button>
+        <button type="button" data-action="back">Leave Lobby</button>
       </div>
     </section>
   `;
@@ -1218,7 +1359,7 @@ function startAiDemoRound(round: number): void {
   renderHud(currentLoadout);
   state = createInitialState(Date.now() >>> 0, currentLoadout);
   appPhase = { name: 'aiDemo', round };
-  log(`AI vs AI round ${round}: ${getShipCatalogEntry(currentLoadout[0]).name} vs ${getShipCatalogEntry(currentLoadout[1]).name}`);
+  log(`Attract Mode round ${round}: ${getShipCatalogEntry(currentLoadout[0]).name} vs ${getShipCatalogEntry(currentLoadout[1]).name}`);
   renderMenu();
 }
 
@@ -1267,22 +1408,112 @@ function generateRandomFleet(budget: number, prefix: string): readonly FleetShip
   return fleet;
 }
 
-async function hostLobbyFromMenu(budget: number): Promise<void> {
-  if (!currentUid || !lobbyRepository) {
-    log('Sign in and configure Firebase before creating a hosted lobby.');
+async function startLaggyMpHost(): Promise<void> {
+  if (!ensureMultiplayerReady('Cannot start Laggy MP Host right now.')) {
     return;
   }
 
-  await createHostLobby(currentUid, lobbyRepository, budget);
+  networkDebugSettings = { ...networkDebugSettings, aiHost: true, aiJoiner: false };
+  maybeApplyMpAiImpairmentDefaults(true);
+
+  try {
+    await createHostLobby(currentUid as string, lobbyRepository as LobbyRepository, LAGGY_MP_BUDGET, 'dev');
+  } catch (error) {
+    const detail = readError(error);
+    log(`Failed to create Laggy MP Host lobby: ${detail}`);
+    showPopup('Could Not Start Laggy MP Host', `Lobby creation failed: ${detail}`);
+  }
+}
+
+async function startLaggyMpClient(): Promise<void> {
+  if (!ensureMultiplayerReady('Cannot start Laggy MP Client right now.')) {
+    return;
+  }
+
+  laggyMpClientButton.disabled = true;
+  try {
+    const repository = lobbyRepository as LobbyRepository;
+    const target = pickJoinableDevLobby(lobbies) ?? (await findDevLobby(repository, LAGGY_MP_FIND_TIMEOUT_MS));
+    if (!target) {
+      showPopup(
+        'No Laggy MP Host Found',
+        'Open another window, click Laggy MP Host first, then try Laggy MP Client.',
+      );
+      return;
+    }
+
+    networkDebugSettings = { ...networkDebugSettings, aiHost: false, aiJoiner: true };
+    maybeApplyMpAiImpairmentDefaults(true);
+
+    try {
+      await joinLobby(target.id, currentUid as string, repository);
+    } catch (error) {
+      const detail = readError(error);
+      log(`Failed to join Laggy MP Host lobby: ${detail}`);
+      showPopup('Could Not Join Laggy MP Host', `Joining the dev lobby failed: ${detail}`);
+    }
+  } finally {
+    laggyMpClientButton.disabled = false;
+  }
+}
+
+async function hostLobbyFromMenu(budget: number): Promise<void> {
+  if (!ensureMultiplayerReady('Cannot create a hosted lobby right now.')) {
+    return;
+  }
+
+  clearAiOverrides();
+
+  try {
+    await createHostLobby(currentUid as string, lobbyRepository as LobbyRepository, budget);
+  } catch (error) {
+    const detail = readError(error);
+    log(`Failed to create lobby: ${detail}`);
+    showPopup('Could Not Create Lobby', `Lobby creation failed: ${detail}`);
+  }
 }
 
 async function joinLobbyFromMenu(lobbyId: string): Promise<void> {
-  if (!currentUid || !lobbyRepository) {
-    log('Sign in and configure Firebase before joining a lobby.');
+  if (!ensureMultiplayerReady('Cannot join a hosted lobby right now.')) {
     return;
   }
 
-  await joinLobby(lobbyId, currentUid, lobbyRepository);
+  clearAiOverrides();
+
+  try {
+    await joinLobby(lobbyId, currentUid as string, lobbyRepository as LobbyRepository);
+  } catch (error) {
+    const detail = readError(error);
+    log(`Failed to join lobby: ${detail}`);
+    showPopup('Could Not Join Lobby', `Joining the lobby failed: ${detail}`);
+  }
+}
+
+function clearAiOverrides(): void {
+  if (!networkDebugSettings.aiHost && !networkDebugSettings.aiJoiner) {
+    return;
+  }
+  networkDebugSettings = { ...networkDebugSettings, aiHost: false, aiJoiner: false };
+}
+
+function ensureMultiplayerReady(actionDescription: string): boolean {
+  if (!isFirebaseConfigured() || !lobbyRepository) {
+    showPopup(
+      'Multiplayer Unavailable',
+      `${actionDescription} Firebase is not configured for this build, so online lobbies are disabled.`,
+    );
+    return false;
+  }
+
+  if (!currentUid) {
+    showPopup(
+      'Sign In Required',
+      `${actionDescription} Sign in anonymously from the multiplayer menu and try again.`,
+    );
+    return false;
+  }
+
+  return true;
 }
 
 function renderLobbies(): void {
@@ -1292,7 +1523,7 @@ function renderLobbies(): void {
     return;
   }
 
-  const visibleLobbies = getVisibleLobbies();
+  const visibleLobbies = getDevPanelLobbies();
   if (visibleLobbies.length === 0) {
     lobbyList.textContent = 'No open lobbies yet.';
     return;
@@ -1303,7 +1534,8 @@ function renderLobbies(): void {
     row.className = 'lobby-row';
     const label = document.createElement('span');
     const isOwnLobby = lobby.hostUid === currentUid;
-    label.textContent = `${lobby.status} | ${lobby.settings.pointTotal} pts | ${lobby.settings.draftMode}${isOwnLobby ? ' | local test' : ''}`;
+    const kindBadge = formatLobbyKindBadge(getLobbyKind(lobby));
+    label.textContent = `${kindBadge} | ${lobby.status} | ${lobby.settings.pointTotal} pts | ${lobby.settings.draftMode}${isOwnLobby ? ' | local test' : ''}`;
     const button = document.createElement('button');
     button.type = 'button';
     button.textContent = 'Join';
@@ -1319,29 +1551,48 @@ function renderLobbies(): void {
 }
 
 function updateLobbyObserver(): void {
-  cleanupLobbyObserver?.();
-  cleanupLobbyObserver = null;
-  lobbies = [];
+  const shouldObserve = appPhase.name === 'lobbyBrowser' && currentUid !== null && lobbyRepository !== null;
 
-  if (!currentUid || !lobbyRepository) {
+  if (!shouldObserve) {
+    if (cleanupLobbyObserver) {
+      cleanupLobbyObserver();
+      cleanupLobbyObserver = null;
+      lobbies = [];
+      renderLobbies();
+    }
     return;
   }
 
-  cleanupLobbyObserver = lobbyRepository.observeOpenLobbies((nextLobbies) => {
+  if (cleanupLobbyObserver) {
+    return;
+  }
+
+  cleanupLobbyObserver = (lobbyRepository as LobbyRepository).observeOpenLobbies((nextLobbies) => {
     lobbies = nextLobbies;
     renderLobbies();
     renderMenu();
   });
 }
 
-async function createHostLobby(uid: string, repository: LobbyRepository, budget: number): Promise<void> {
-  const lobbyId = await repository.createLobby(uid, { pointTotal: budget, draftMode: 'open' });
-  log(`Created lobby ${lobbyId}. Waiting for a joiner...`);
-  peerSession?.close();
+async function createHostLobby(
+  uid: string,
+  repository: LobbyRepository,
+  budget: number,
+  kind: LobbyKind = 'standard',
+): Promise<void> {
+  cleanupHostLobbyIfOwned();
+  const lobbyId = await repository.createLobby(uid, { pointTotal: budget, draftMode: 'open', kind });
+  currentHostLobbyId = lobbyId;
+  log(`Created ${kind} lobby ${lobbyId}. Waiting for a joiner...`);
+  if (peerSession) {
+    suppressPeerDisconnectPopup = true;
+    peerSession.close();
+  }
   networkMatch = null;
   networkMatchStatus = null;
   pendingHostShip = null;
   pendingJoinerShip = null;
+  suppressPeerDisconnectPopup = false;
   peerSession = createPeerSession('host', lobbyId, repository, budget);
   appPhase = { name: 'networkConnecting', role: 'host', budget, lobbyId };
   renderMenu();
@@ -1352,15 +1603,27 @@ async function joinLobby(lobbyId: string, uid: string, repository: LobbyReposito
   const lobby = lobbies.find((item) => item.id === lobbyId);
   const budget = lobby?.settings.pointTotal ?? 100;
   log(`Joining lobby ${lobbyId}...`);
-  const claimed = await repository.claimLobby(lobbyId, uid);
-  if (!claimed) {
-    log('Could not claim lobby. It may already be connecting or expired.');
+  const claim = await repository.claimLobby(lobbyId, uid);
+  if (!claim.success) {
+    const detail = claim.detail ? ` (${claim.detail})` : '';
+    log(`Could not claim lobby ${lobbyId}: ${claim.reason}${detail}`);
+    if (claim.observedLobby !== undefined) {
+      log(`Observed lobby state: ${JSON.stringify(claim.observedLobby)}`);
+    }
+    if (claim.committedSnapshot !== undefined) {
+      log(`Post-transaction snapshot: ${JSON.stringify(claim.committedSnapshot)}`);
+    }
+    showPopup('Lobby Unavailable', `Could not claim lobby (${claim.reason}). See debug log for details.`);
     return;
   }
 
-  peerSession?.close();
+  if (peerSession) {
+    suppressPeerDisconnectPopup = true;
+    peerSession.close();
+  }
   networkMatch = null;
   networkMatchStatus = null;
+  suppressPeerDisconnectPopup = false;
   peerSession = createPeerSession('joiner', lobbyId, repository, budget);
   appPhase = { name: 'networkConnecting', role: 'joiner', budget, lobbyId };
   renderMenu();
@@ -1373,18 +1636,43 @@ function createPeerSession(
   repository: LobbyRepository,
   budget: number,
 ): PeerConnectionSession {
-  return new PeerConnectionSession(role, lobbyId, repository, {
+  let session: PeerConnectionSession;
+  const isStale = (): boolean => peerSession !== session;
+
+  session = new PeerConnectionSession(role, lobbyId, repository, {
     onStateChange: (connectionState: ConnectionState) => {
+      if (isStale()) {
+        return;
+      }
+
       peerConnectionState = connectionState;
       if (connectionState === 'connected' && !networkMatch) {
         startNetworkMatchWhenReady(role, budget, lobbyId);
       }
 
       if (connectionState === 'closed' || connectionState === 'failed') {
+        const wasInActiveFlow =
+          appPhase.name === 'networkFight' ||
+          appPhase.name === 'networkConnecting' ||
+          appPhase.name === 'networkFleetBuild';
         networkMatch = null;
         networkMatchStatus = null;
-        if (appPhase.name === 'networkFight' || appPhase.name === 'networkConnecting' || appPhase.name === 'networkFleetBuild') {
+        if (wasInActiveFlow) {
           appPhase = { name: 'multiplayerMenu' };
+        }
+
+        if (wasInActiveFlow && !suppressPeerDisconnectPopup) {
+          if (connectionState === 'failed') {
+            showPopup(
+              'Connection Failed',
+              'The peer connection failed before the match could continue. Returning to the multiplayer menu.',
+            );
+          } else {
+            showPopup(
+              'Connection Closed',
+              'The peer connection closed unexpectedly. Returning to the multiplayer menu.',
+            );
+          }
         }
       }
 
@@ -1393,9 +1681,15 @@ function createPeerSession(
       log(`Peer state changed to ${connectionState}.`);
     },
     onControlMessage: (message) => {
+      if (isStale()) {
+        return;
+      }
       handleNetworkControlMessage(role, budget, lobbyId, message);
     },
     onGameplayMessage: (message) => {
+      if (isStale()) {
+        return;
+      }
       if (!networkMatch) {
         log('Received gameplay packet before match session was ready.');
         return;
@@ -1422,6 +1716,7 @@ function createPeerSession(
       }
     },
   });
+  return session;
 }
 
 function startNetworkMatchWhenReady(role: ConnectionRole, budget: number, lobbyId: string): void {
@@ -1498,13 +1793,20 @@ function handleNetworkControlMessage(role: ConnectionRole, budget: number, lobby
 function closePeer(): void {
   clearPendingGameplayPackets();
   presentationCorrection = null;
+  const hadPeer = peerSession !== null;
+  if (hadPeer) {
+    suppressPeerDisconnectPopup = true;
+  }
   peerSession?.close();
   peerSession = null;
   networkMatch = null;
   networkMatchStatus = null;
   pendingHostShip = null;
   pendingJoinerShip = null;
-  peerConnectionState = 'closed';
+  if (hadPeer) {
+    peerConnectionState = 'closed';
+  }
+  suppressPeerDisconnectPopup = false;
   updatePeerStatus();
 }
 
@@ -1638,6 +1940,133 @@ function updateNetworkRecoveryOverlay(): void {
   }
 }
 
+function updateArenaHint(): void {
+  const hintText = getArenaHintText();
+  arenaHint.classList.toggle('arena-hint-hidden', hintText === null);
+  if (hintText !== null) {
+    arenaHint.textContent = hintText;
+  }
+}
+
+function getArenaHintText(): string | null {
+  if (appPhase.name === 'aiDemo' || appPhase.name === 'fighting' || appPhase.name === 'networkFight') {
+    return 'ESC for menu';
+  }
+
+  return null;
+}
+
+function showPopup(title: string, message: string): void {
+  popupTitle.textContent = title;
+  popupMessage.textContent = message;
+  popupOverlay.classList.remove('popup-overlay-hidden');
+  window.setTimeout(() => popupDismissButton.focus(), 0);
+}
+
+function hidePopup(): void {
+  popupOverlay.classList.add('popup-overlay-hidden');
+}
+
+function isPauseMenuAvailable(): boolean {
+  return appPhase.name !== 'loading' && appPhase.name !== 'mainMenu';
+}
+
+function openPauseMenu(): void {
+  if (!isPauseMenuAvailable() || pauseMenuOpen) {
+    return;
+  }
+  pauseMenuOpen = true;
+  pauseOverlay.classList.remove('pause-overlay-hidden');
+  window.setTimeout(() => pauseResumeButton.focus(), 0);
+}
+
+function closePauseMenu(): void {
+  if (!pauseMenuOpen) {
+    return;
+  }
+  pauseMenuOpen = false;
+  pauseOverlay.classList.add('pause-overlay-hidden');
+}
+
+function togglePauseMenu(): void {
+  if (pauseMenuOpen) {
+    closePauseMenu();
+    return;
+  }
+  openPauseMenu();
+}
+
+function cleanupHostLobbyIfOwned(): void {
+  const lobbyId = currentHostLobbyId;
+  currentHostLobbyId = null;
+  if (!lobbyId || !lobbyRepository) {
+    return;
+  }
+  void lobbyRepository
+    .deleteLobby(lobbyId)
+    .catch((error) => log(`Could not delete abandoned lobby ${lobbyId}: ${readError(error)}`));
+}
+
+function quitToMainMenu(): void {
+  closePauseMenu();
+  cleanupHostLobbyIfOwned();
+  closePeer();
+  currentLoadout = DEFAULT_MATCH_SHIPS;
+  state = createInitialState(undefined, currentLoadout);
+  renderer.setShipLoadout(currentLoadout);
+  renderHud(currentLoadout);
+  appPhase = { name: 'mainMenu' };
+  renderMenu();
+}
+
+function leaveLobby(): void {
+  if (appPhase.name !== 'networkConnecting') {
+    return;
+  }
+
+  cleanupHostLobbyIfOwned();
+  closePeer();
+  appPhase = { name: 'multiplayerMenu' };
+  renderMenu();
+}
+
+function leaveMatch(): void {
+  if (appPhase.name !== 'networkFleetBuild') {
+    return;
+  }
+
+  closePeer();
+  appPhase = { name: 'multiplayerMenu' };
+  renderMenu();
+}
+
+function goBack(): void {
+  switch (appPhase.name) {
+    case 'singleBudget':
+      appPhase = { name: 'mainMenu' };
+      break;
+    case 'fleetBuild':
+      appPhase = { name: 'singleBudget' };
+      break;
+    case 'multiplayerMenu':
+      appPhase = { name: 'mainMenu' };
+      break;
+    case 'hostSetup':
+    case 'lobbyBrowser':
+      appPhase = { name: 'multiplayerMenu' };
+      break;
+    case 'networkConnecting':
+      leaveLobby();
+      return;
+    case 'networkFleetBuild':
+      leaveMatch();
+      return;
+    default:
+      return;
+  }
+  renderMenu();
+}
+
 function formatPeerSummary(connectionState: ConnectionState, status: NetworkMatchStatus | null): string {
   if (!status) {
     return `Peer: ${connectionState}`;
@@ -1675,7 +2104,7 @@ function formatMatchStatus(renderState: GameState): string {
     }
     if (appPhase.name === 'aiDemo') {
       const remainingSeconds = Math.max(0, Math.ceil((AI_DEMO_ROUND_FRAMES - renderState.frame) / SIM_FPS));
-      return `AI vs AI round ${appPhase.round} | ${remainingSeconds}s until reroll`;
+      return `Attract Mode round ${appPhase.round} | ${remainingSeconds}s until reroll`;
     }
     return 'Match active';
   }
@@ -2025,8 +2454,17 @@ function getSideName(sideId: number): string {
   return sideId === 0 ? 'Player' : 'AI';
 }
 
-function getVisibleLobbies(): readonly LobbyRecord[] {
+function getStandardMenuLobbies(): readonly LobbyRecord[] {
+  const standard = lobbies.filter((lobby) => getLobbyKind(lobby) === 'standard');
+  return showOwnLobbiesCheckbox.checked ? standard : standard.filter((lobby) => lobby.hostUid !== currentUid);
+}
+
+function getDevPanelLobbies(): readonly LobbyRecord[] {
   return showOwnLobbiesCheckbox.checked ? lobbies : lobbies.filter((lobby) => lobby.hostUid !== currentUid);
+}
+
+function formatLobbyKindBadge(kind: LobbyKind): string {
+  return kind === 'dev' ? 'DEV' : 'standard';
 }
 
 function readBudget(button: HTMLButtonElement): number {

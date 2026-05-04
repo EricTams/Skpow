@@ -194,6 +194,109 @@ button:disabled {
   color: #c9d1d9;
 }
 
+.arena-hint {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  margin-top: 0.6rem;
+  padding: 0.35rem 0.85rem;
+  border: 1px solid rgba(248, 216, 120, 0.55);
+  border-radius: 999px;
+  background: rgba(2, 4, 13, 0.78);
+  color: #f8d878;
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+.arena-hint-hidden {
+  display: none;
+}
+
+.popup-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  background: rgba(2, 4, 13, 0.78);
+  color: #e6edf3;
+  text-align: center;
+}
+
+.popup-overlay-hidden {
+  display: none;
+}
+
+.pause-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  background: rgba(2, 4, 13, 0.72);
+  color: #e6edf3;
+  text-align: center;
+}
+
+.pause-overlay-hidden {
+  display: none;
+}
+
+.pause-card {
+  width: min(86%, 24rem);
+  border: 1px solid rgba(121, 192, 255, 0.55);
+  border-radius: 16px;
+  background: rgba(5, 8, 20, 0.96);
+  box-shadow: 0 20px 70px rgba(0, 0, 0, 0.5);
+  padding: 1.25rem;
+}
+
+.pause-card h2 {
+  margin: 0 0 0.75rem;
+  color: #79c0ff;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.pause-card .menu-actions {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+}
+
+.popup-card {
+  width: min(86%, 28rem);
+  border: 1px solid rgba(248, 120, 120, 0.55);
+  border-radius: 16px;
+  background: rgba(5, 8, 20, 0.96);
+  box-shadow: 0 20px 70px rgba(0, 0, 0, 0.5);
+  padding: 1.25rem;
+}
+
+.popup-card h2 {
+  margin: 0 0 0.5rem;
+  color: #f8a878;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.popup-card p {
+  margin: 0 0 0.75rem;
+  color: #c9d1d9;
+}
+
+.popup-card .menu-actions {
+  justify-content: center;
+}
+
 .menu-card {
   width: min(92%, 34rem);
   max-height: 95%;
@@ -561,6 +664,13 @@ button:disabled {
   gap: 0.5rem;
   margin-top: 0.75rem;
   color: #c9d1d9;
+}
+
+.dev-helper-text {
+  margin-top: 0.5rem;
+  color: #8b949e;
+  font-size: 0.8rem;
+  font-style: italic;
 }
 
 .lobby-list {
