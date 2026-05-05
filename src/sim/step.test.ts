@@ -507,6 +507,99 @@ describe('reference-backed ship abilities', () => {
     expect(next.projectiles.every((projectile) => fixedToNumber(next.ships[0].x) - fixedToNumber(projectile.x) > 30)).toBe(true);
   });
 
+  it('gates Nurtip asteroid launches by their battery cost', () => {
+    const lowBattery = withShip(createInitialState(123, ['nurtip', 'frog']), { battery: 5 });
+    const blocked = stepGame(lowBattery, [InputBits.FireSecondary, 0]);
+    const ready = withShip(createInitialState(123, ['nurtip', 'frog']), { battery: 6 });
+    const fired = stepGame(ready, [InputBits.FireSecondary, 0]);
+
+    expect(blocked.projectiles.filter((projectile) => projectile.kind === 'nurtipAsteroid')).toHaveLength(0);
+    expect(blocked.ships[0].battery).toBe(5);
+    expect(fired.projectiles.filter((projectile) => projectile.kind === 'nurtipAsteroid')).toHaveLength(1);
+    expect(fired.ships[0].battery).toBe(0);
+  });
+
+  it('keeps Nurtip primary missiles moving in a straight line', () => {
+    let state = withShip(createInitialState(123, ['nurtip', 'frog']), {
+      x: fixedFromInt(500),
+      y: fixedFromInt(0),
+      vx: fixed(0),
+      vy: fixed(0),
+      angle: angle(0),
+    });
+    state = stepGame(state, [InputBits.FirePrimary, 0]);
+    const spawned = state.projectiles.find((projectile) => projectile.kind === 'nurtipMissile');
+    expect(spawned).toBeDefined();
+    if (!spawned) {
+      return;
+    }
+
+    for (let frame = 0; frame < 20; frame += 1) {
+      state = stepGame(state, [InputBits.FirePrimary, 0]);
+    }
+
+    const missile = state.projectiles.find((projectile) => projectile.id === spawned.id);
+    expect(missile).toMatchObject({
+      y: spawned.y,
+      vy: fixed(0),
+      angle: angle(0),
+      trackPct: fixed(0),
+    });
+    expect(missile?.x).toBeGreaterThan(spawned.x);
+  });
+
+  it('spreads Nurtip asteroids into evenly spaced orbit slots', () => {
+    const twoAsteroids = settleNurtipAsteroids(launchNurtipAsteroids(2));
+    const threeAsteroids = settleNurtipAsteroids(launchNurtipAsteroids(3));
+
+    expectOrbitGaps(twoAsteroids.projectiles, [Math.PI, Math.PI]);
+    expectOrbitGaps(threeAsteroids.projectiles, [(Math.PI * 2) / 3, (Math.PI * 2) / 3, (Math.PI * 2) / 3]);
+  });
+
+  it('spawns new Nurtip asteroids directly in their target slot', () => {
+    const twoAsteroids = settleNurtipAsteroids(launchNurtipAsteroids(2));
+    const next = stepGame(withShip(twoAsteroids, { battery: 36, secondaryCooldown: 0 }), [InputBits.FireSecondary, 0]);
+    const asteroids = next.projectiles.filter((projectile) => projectile.kind === 'nurtipAsteroid').sort((left, right) => left.id - right.id);
+    const newest = asteroids[2];
+
+    expect(asteroids).toHaveLength(3);
+    expect(Math.abs(wrappedRadiansDelta(projectileOrbitAngle(newest), (Math.PI * 2) / 3 * 2 + twoAsteroids.frame * 0.02))).toBeLessThan(0.001);
+  });
+
+  it('slides Nurtip asteroids toward new slots when one is destroyed', () => {
+    let state = settleNurtipAsteroids(launchNurtipAsteroids(3));
+
+    const asteroids = state.projectiles.filter((projectile) => projectile.kind === 'nurtipAsteroid').sort((left, right) => left.id - right.id);
+    const survivorBefore = asteroids[2];
+    const afterRemoval = {
+      ...state,
+      projectiles: state.projectiles.filter((projectile) => projectile.id !== asteroids[0].id),
+    };
+    const oneFrame = stepGame(afterRemoval, [0, 0]);
+    const survivorAfterOne = oneFrame.projectiles.find((projectile) => projectile.id === survivorBefore.id);
+    expect(survivorAfterOne).toBeDefined();
+    if (!survivorAfterOne) {
+      return;
+    }
+
+    const oneFrameDelta = Math.abs(wrappedRadiansDelta(projectileOrbitAngle(survivorAfterOne), projectileOrbitAngle(survivorBefore)));
+    expect(oneFrameDelta).toBeLessThanOrEqual(0.051);
+
+    const oneFrameGapError = Math.max(...getOrbitGaps(oneFrame.projectiles).map((gap) => Math.abs(gap - Math.PI)));
+    expect(oneFrameGapError).toBeGreaterThan(0.5);
+
+    const settled = settleNurtipAsteroids(oneFrame);
+    const survivorLater = settled.projectiles.find((projectile) => projectile.id === survivorBefore.id);
+    expect(survivorLater).toBeDefined();
+    if (!survivorLater) {
+      return;
+    }
+
+    const laterDelta = Math.abs(wrappedRadiansDelta(projectileOrbitAngle(survivorLater), projectileOrbitAngle(survivorBefore)));
+    expect(laterDelta).toBeGreaterThan(0.5);
+    expectOrbitGaps(settled.projectiles, [Math.PI, Math.PI]);
+  });
+
   it('does not let a ship damage itself by shooting an enemy actor riding on its hull', () => {
     const seeded = createInitialState(123, ['pscout', 'zizlik']);
     const target = seeded.ships[1];
@@ -585,6 +678,60 @@ function withShip(state: GameState, ship: Partial<ShipState>): GameState {
     ...state,
     ships: [{ ...state.ships[0], ...ship }, state.ships[1]],
   };
+}
+
+function launchNurtipAsteroids(count: number): GameState {
+  let state = createInitialState(123, ['nurtip', 'frog']);
+  for (let index = 0; index < count; index += 1) {
+    state = stepGame(withShip(state, { battery: 36, secondaryCooldown: 0 }), [InputBits.FireSecondary, 0]);
+  }
+  return state;
+}
+
+function settleNurtipAsteroids(state: GameState): GameState {
+  let settled = state;
+  for (let frame = 0; frame < 180; frame += 1) {
+    settled = stepGame(settled, [0, 0]);
+  }
+  return settled;
+}
+
+function projectileOrbitAngle(projectile: ProjectileState): number {
+  return Math.atan2(fixedToNumber(projectile.vy), fixedToNumber(projectile.vx));
+}
+
+function expectOrbitGaps(projectiles: readonly ProjectileState[], expectedGaps: readonly number[]): void {
+  const gaps = getOrbitGaps(projectiles);
+  expect(gaps).toHaveLength(expectedGaps.length);
+  for (let index = 0; index < expectedGaps.length; index += 1) {
+    expect(gaps[index]).toBeCloseTo(expectedGaps[index], 2);
+  }
+}
+
+function getOrbitGaps(projectiles: readonly ProjectileState[]): number[] {
+  const angles = projectiles
+    .filter((projectile) => projectile.kind === 'nurtipAsteroid')
+    .map((projectile) => {
+      const radians = projectileOrbitAngle(projectile);
+      return radians < 0 ? radians + Math.PI * 2 : radians;
+    })
+    .sort((left, right) => left - right);
+
+  return angles.map((radians, index) => {
+    const next = angles[(index + 1) % angles.length];
+    return index === angles.length - 1 ? next + Math.PI * 2 - radians : next - radians;
+  });
+}
+
+function wrappedRadiansDelta(to: number, from: number): number {
+  let delta = to - from;
+  while (delta > Math.PI) {
+    delta -= Math.PI * 2;
+  }
+  while (delta < -Math.PI) {
+    delta += Math.PI * 2;
+  }
+  return delta;
 }
 
 function buildProjectile(options: {

@@ -1,6 +1,6 @@
 import { fixed, fixedFromInt, fixedMul, type Fixed } from './fixed';
 
-export type ShipId = 'frog' | 'cannonade' | 'zizlik' | 'voskum' | 'pscout' | 'kron' | 'gooj' | 'krab';
+export type ShipId = 'frog' | 'cannonade' | 'zizlik' | 'voskum' | 'pscout' | 'kron' | 'gooj' | 'krab' | 'nurtip';
 
 export type ProjectileKind =
   | 'generic'
@@ -14,7 +14,9 @@ export type ProjectileKind =
   | 'goojTorp'
   | 'goojJunk'
   | 'krabLong'
-  | 'krabShort';
+  | 'krabShort'
+  | 'nurtipMissile'
+  | 'nurtipAsteroid';
 
 export interface WeaponSpec {
   readonly speed: Fixed;
@@ -251,6 +253,40 @@ export const SHIP_SPECS: Record<ShipId, ShipSpec> = {
       damage: 1,
       radius: fixedFromInt(16),
       kind: 'goojJunk',
+    },
+  },
+  nurtip: {
+    id: 'nurtip',
+    crew: 36,
+    battery: 36,
+    batteryChargeFrames: 40,
+    turnStep: legacyTurnStep(0.012),
+    maxSpeed: legacyMaxSpeed(1.39),
+    accel: legacyAccel(0.018),
+    brake: fixed(0.99),
+    radius: legacyHitRadius(75, 0.6),
+    renderScale: 0.6,
+    primary: {
+      // Legacy ShootMainWeapon: speed 6, life 600, mDamage 6, mBatt -= 6, no real frame cooldown.
+      // framesPerShot=1 is just a same-frame double-launch guard; nurtipPrimaryArmed gates re-launch.
+      speed: fixed(6),
+      framesPerShot: 1,
+      cost: 6,
+      ttl: 600,
+      damage: 6,
+      radius: fixedFromInt(15),
+      kind: 'nurtipMissile',
+    },
+    secondary: {
+      // Legacy ShootSpecialWeapon: speed 5, life 4000, dmg 6, mFramesPerShot 32, mBatt -= 6.
+      // We tighten ttl down because our orbital model just has the rocks ride around; 4000f felt forever.
+      speed: fixed(2.25),
+      framesPerShot: 32,
+      cost: 6,
+      ttl: 600,
+      damage: 4,
+      radius: fixedFromInt(20),
+      kind: 'nurtipAsteroid',
     },
   },
   krab: {

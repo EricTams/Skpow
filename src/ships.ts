@@ -166,6 +166,25 @@ export const SHIP_CATALOG: readonly ShipCatalogEntry[] = [
     },
   },
   {
+    id: 'nurtip',
+    name: 'Nurtip',
+    cost: 60,
+    crew: SHIP_SPECS.nurtip.crew,
+    battery: SHIP_SPECS.nurtip.battery,
+    render: {
+      spriteKey: 'nurtipShip',
+      scale: 0.6,
+      projectileKey: 'nurtipMissile',
+      projectileScale: 0.45,
+    },
+    hud: {
+      nameKey: 'nurtipName',
+      portraitKey: 'nurtipPortrait',
+      shipKey: 'nurtipShip',
+      shipScale: 1.8,
+    },
+  },
+  {
     id: 'krab',
     name: 'Krab',
     cost: 50,

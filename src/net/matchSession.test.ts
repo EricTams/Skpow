@@ -299,6 +299,56 @@ describe('network match session', () => {
     expect(host.currentState?.ships[1].crew).toBe(defender.crew - 1);
   });
 
+  it('lets the defender apply and confirm remote Nurtip detonation hits', () => {
+    const { host, joiner } = connectSessions({ seed: 123, loadout: ['nurtip', 'frog'] });
+    const defender = joiner.currentState?.ships[1];
+    expect(defender).toBeDefined();
+    if (!defender) {
+      return;
+    }
+
+    const missile = buildProjectile({
+      id: 1,
+      ownerId: 0,
+      kind: 'nurtipMissile',
+      x: defender.x,
+      y: defender.y,
+      damage: 6,
+      radius: fixedFromInt(15),
+    });
+    joiner.receiveGameplayMessage(encodeProjectileSpawnPacket({ roundId: 0, frame: joiner.currentState?.frame ?? 0, projectile: missile }));
+    expect(joiner.currentState?.projectiles.some((projectile) => projectile.id === missile.id)).toBe(true);
+
+    joiner.receiveGameplayMessage(
+      encodeOwnerWeaponEventPacket({
+        roundId: 0,
+        eventId: '0:1:primary:nurtipDetonate',
+        frame: joiner.currentState?.frame ?? 0,
+        ownerId: 0,
+        weapon: 'primary',
+        effectKind: 'nurtipDetonate',
+        x: defender.x,
+        y: defender.y,
+        vx: fixed(0),
+        vy: fixed(0),
+        angle: angle(0),
+      }),
+    );
+
+    expect(joiner.currentState?.ships[1].crew).toBe(defender.crew - 2);
+    expect(joiner.currentState?.projectiles.some((projectile) => projectile.id === missile.id)).toBe(false);
+    expect(joiner.currentState?.effects.some((effect) => effect.kind === 'nurtipExplosion')).toBe(true);
+
+    const hitPacket = joiner.takeOutgoingPackets().find((packet) => decodeGameplayPacket(packet).type === GameplayPacketType.DefenderHit);
+    expect(hitPacket).toBeDefined();
+    if (!hitPacket) {
+      return;
+    }
+
+    host.receiveGameplayMessage(hitPacket);
+    expect(host.currentState?.ships[1].crew).toBe(defender.crew - 2);
+  });
+
   it('spawns Zizlik clone actors on the joiner when the host fires its secondary', () => {
     const { joiner } = connectSessions({ seed: 123, loadout: ['zizlik', 'frog'] });
     const ship = joiner.currentState?.ships[0];

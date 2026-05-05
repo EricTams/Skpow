@@ -15,6 +15,10 @@ const PSCOUT_RENDER_BEAM_FRAMES = 200;
 const VOSKUM_TELEPORT_VISUAL_FRAMES = 24;
 const VOSKUM_TELEPORT_IMPRINT_COLOR = '#66ff66';
 const SHIP_EXPLOSION_FRAME_COUNT = 40;
+const NURTIP_MISSILE_FRAME_COUNT = 13;
+const NURTIP_ASTEROID_FRAME_COUNT = 20;
+const NURTIP_EXPLOSION_FRAME_COUNT = 8;
+const NURTIP_EXPLOSION_LIFE = 32;
 const SHIP_EXPLOSION_LIFE_AT_FIRST_FRAME = 80;
 const SHIP_EXPLOSION_RENDER_SCALE = 1.0;
 const THRUST_DUST_COLOR = 'rgb(255, 144, 64)';
@@ -117,7 +121,7 @@ export class CanvasRenderer {
 
     // Explosion blooms draw above ships (legacy DrawPost).
     for (const effect of state.effects) {
-      if (effect.kind === 'shipExplosion') {
+      if (effect.kind === 'shipExplosion' || effect.kind === 'nurtipExplosion') {
         this.drawEffect(effect, camera);
       }
     }
@@ -292,6 +296,9 @@ export class CanvasRenderer {
       case 'krab':
         this.drawKrabShip(ship, camera, x, y, spriteRadians);
         break;
+      case 'nurtip':
+        this.drawNurtipShip(ship, camera, x, y, angleRadians, spriteRadians);
+        break;
       default:
         this.drawGenericShip(ship, camera, x, y, spriteRadians);
         break;
@@ -394,6 +401,29 @@ export class CanvasRenderer {
   private drawKrabShip(ship: ShipState, camera: LegacyCamera, x: number, y: number, radians: number): void {
     const spriteKey = ship.custom.krabLongRange ? 'krabShip' : 'krabShip2';
     this.drawSimpleShip(ship, camera, x, y, radians, spriteKey, 0.5);
+  }
+
+  private drawNurtipShip(
+    ship: ShipState,
+    camera: LegacyCamera,
+    x: number,
+    y: number,
+    angleRadians: number,
+    spriteRadians: number,
+  ): void {
+    this.drawSimpleShip(ship, camera, x, y, spriteRadians, 'nurtipShip', 0.6);
+
+    // Reference Nurtip::Draw alternates two barrel sprites while a primary missile is ready/in-flight.
+    const primaryReady = ship.alive && ship.primaryCooldown === 0 && ship.battery >= 6;
+    const primaryArmed = Boolean(ship.custom.nurtipPrimaryArmed);
+    if (primaryReady || primaryArmed) {
+      const barrelKey: LegacyAssetKey = (ship.id + ship.angle) % 2 === 0 ? 'nurtipBarrel1' : 'nurtipBarrel2';
+      const offset = 18 * camera.scale;
+      const offsetX = Math.cos(angleRadians) * offset;
+      const offsetY = Math.sin(angleRadians) * offset;
+      const alpha = primaryArmed ? 0.6 : 1;
+      this.drawSpriteAt(barrelKey, x + offsetX, y + offsetY, spriteRadians, camera.scale * 0.6, alpha);
+    }
   }
 
   private drawVoskumTeleportImprints(ship: ShipState, camera: LegacyCamera): void {
@@ -635,6 +665,16 @@ export class CanvasRenderer {
     const x = this.toScreenX(fixedToNumber(projectile.x), camera);
     const y = this.toScreenY(fixedToNumber(projectile.y), camera);
     const radians = this.getProjectileSpriteRadians(projectile);
+
+    if (projectile.kind === 'nurtipMissile') {
+      this.drawNurtipMissileProjectile(projectile, camera, x, y, radians);
+      return;
+    }
+    if (projectile.kind === 'nurtipAsteroid') {
+      this.drawNurtipAsteroidProjectile(projectile, camera, x, y);
+      return;
+    }
+
     const spec = getShipCatalogEntry(this.shipLoadout[projectile.ownerId] ?? DEFAULT_MATCH_SHIPS[projectile.ownerId]).render;
     const key = this.getProjectileSpriteKey(projectile, spec.projectileKey);
     const scale = this.getProjectileRenderScale(projectile, spec.projectileScale);
@@ -658,6 +698,81 @@ export class CanvasRenderer {
     const size = 6 * camera.scale;
     ctx.fillStyle = PROJECTILE_COLORS[projectile.ownerId] ?? '#d2a8ff';
     ctx.fillRect(x - size / 2, y - size / 2, size, size);
+  }
+
+  private drawNurtipMissileProjectile(
+    projectile: ProjectileState,
+    camera: LegacyCamera,
+    x: number,
+    y: number,
+    radians: number,
+  ): void {
+    const image = this.images.getLoaded('nurtipMissile');
+    const ctx = this.context;
+    if (!image) {
+      const size = 8 * camera.scale;
+      ctx.fillStyle = '#ffd28a';
+      ctx.fillRect(x - size / 2, y - size / 2, size, size);
+      return;
+    }
+    // Each cel is one strip frame; cycle through them at ~12fps to flicker the rocket art.
+    const frameIndex = Math.floor(projectile.ttl / 5) % NURTIP_MISSILE_FRAME_COUNT;
+    const cellWidth = image.naturalWidth / NURTIP_MISSILE_FRAME_COUNT;
+    const cellHeight = image.naturalHeight;
+    const drawScale = camera.scale * 0.55;
+    const drawWidth = cellWidth * drawScale;
+    const drawHeight = cellHeight * drawScale;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(radians);
+    ctx.drawImage(
+      image,
+      frameIndex * cellWidth,
+      0,
+      cellWidth,
+      cellHeight,
+      -drawWidth / 2,
+      -drawHeight / 2,
+      drawWidth,
+      drawHeight,
+    );
+    ctx.restore();
+  }
+
+  private drawNurtipAsteroidProjectile(
+    projectile: ProjectileState,
+    camera: LegacyCamera,
+    x: number,
+    y: number,
+  ): void {
+    const image = this.images.getLoaded('nurtipAsteroid');
+    const ctx = this.context;
+    if (!image) {
+      const size = 10 * camera.scale;
+      ctx.fillStyle = '#a87f4a';
+      ctx.fillRect(x - size / 2, y - size / 2, size, size);
+      return;
+    }
+    // Use rotation accumulator to pick a tumbling cel; the strip is a full 360° cycle.
+    const rot = fixedToNumber(projectile.rotation);
+    const normalized = ((rot % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+    const frameIndex = Math.floor((normalized / (Math.PI * 2)) * NURTIP_ASTEROID_FRAME_COUNT) % NURTIP_ASTEROID_FRAME_COUNT;
+    const cellWidth = image.naturalWidth / NURTIP_ASTEROID_FRAME_COUNT;
+    const cellHeight = image.naturalHeight;
+    const drawScale = camera.scale * 0.5;
+    const drawWidth = cellWidth * drawScale;
+    const drawHeight = cellHeight * drawScale;
+    ctx.drawImage(
+      image,
+      frameIndex * cellWidth,
+      0,
+      cellWidth,
+      cellHeight,
+      x - drawWidth / 2,
+      y - drawHeight / 2,
+      drawWidth,
+      drawHeight,
+    );
   }
 
   private getProjectileSpriteKey(projectile: ProjectileState, fallback: LegacyAssetKey): LegacyAssetKey {
@@ -748,6 +863,11 @@ export class CanvasRenderer {
       return;
     }
 
+    if (effect.kind === 'nurtipExplosion') {
+      this.drawNurtipExplosion(effect, camera);
+      return;
+    }
+
     if (effect.kind !== 'shipExplosion') {
       return;
     }
@@ -778,6 +898,51 @@ export class CanvasRenderer {
     const drawWidth = cellWidth * drawScale;
     const drawHeight = cellHeight * drawScale;
 
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.drawImage(
+      image,
+      frameIndex * cellWidth,
+      0,
+      cellWidth,
+      cellHeight,
+      x - drawWidth / 2,
+      y - drawHeight / 2,
+      drawWidth,
+      drawHeight,
+    );
+    ctx.restore();
+  }
+
+  private drawNurtipExplosion(effect: EffectState, camera: LegacyCamera): void {
+    const ctx = this.context;
+    const x = this.toScreenX(fixedToNumber(effect.x), camera);
+    const y = this.toScreenY(fixedToNumber(effect.y), camera);
+    const image = this.images.getLoaded('nurtipExplosion');
+    const elapsed = NURTIP_EXPLOSION_LIFE - effect.life;
+    if (!image) {
+      // Fallback: bright AOE bubble that fades.
+      const alpha = Math.max(0, effect.life / NURTIP_EXPLOSION_LIFE);
+      const radius = 60 * camera.scale * (1 + elapsed / NURTIP_EXPLOSION_LIFE);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = alpha * 0.6;
+      ctx.fillStyle = '#ffd28a';
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      return;
+    }
+    const frameIndex = Math.min(
+      NURTIP_EXPLOSION_FRAME_COUNT - 1,
+      Math.max(0, Math.floor((elapsed * NURTIP_EXPLOSION_FRAME_COUNT) / NURTIP_EXPLOSION_LIFE)),
+    );
+    const cellWidth = image.naturalWidth / NURTIP_EXPLOSION_FRAME_COUNT;
+    const cellHeight = image.naturalHeight;
+    const drawScale = camera.scale * 1.0;
+    const drawWidth = cellWidth * drawScale;
+    const drawHeight = cellHeight * drawScale;
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     ctx.drawImage(

@@ -73,8 +73,12 @@ export function getAiInput(state: GameState, playerId: number): number {
       ? shouldZizlikFire(ship, enemy, state)
       : ship.shipId === 'frog'
         ? shouldFrogHoldFire(ship, inFiringPosition)
-        : inFiringPosition;
-  if (shouldFirePrimary && canAffordPrimary) {
+        : ship.shipId === 'nurtip'
+          ? shouldNurtipFire(ship, enemy, state, inFiringPosition)
+          : inFiringPosition;
+  // Nurtip can hold the fire bit even with depleted battery: holding is free, only launch costs.
+  const isNurtipHolding = ship.shipId === 'nurtip' && Boolean(ship.custom.nurtipPrimaryArmed);
+  if (shouldFirePrimary && (canAffordPrimary || isNurtipHolding)) {
     input |= InputBits.FirePrimary;
   }
 
@@ -176,6 +180,31 @@ function shouldFrogHoldFire(ship: ShipState, inFiringPosition: boolean): boolean
   return true;
 }
 
+// Nurtip primary is a remote-detonate torpedo: tap to launch, hold while it cruises, release for AOE.
+// We launch when in firing position (no missile out), hold while the missile isn't yet on top of the
+// enemy, and release once it's inside its 150-radius detonation envelope.
+const NURTIP_AI_RELEASE_RADIUS = 130;
+
+function shouldNurtipFire(ship: ShipState, enemy: ShipState, state: GameState, inFiringPosition: boolean): boolean {
+  if (!ship.custom.nurtipPrimaryArmed) {
+    return inFiringPosition;
+  }
+
+  const missile = state.projectiles.find(
+    (projectile) => projectile.active && projectile.kind === 'nurtipMissile' && projectile.ownerId === ship.id,
+  );
+  if (!missile) {
+    // Custom flag and projectile pool desynced for one frame — keep holding so the next stepShip clears it.
+    return true;
+  }
+
+  const arenaWidth = fixedToNumber(state.arena.width);
+  const arenaHeight = fixedToNumber(state.arena.height);
+  const dx = getWrappedDelta(fixedToNumber(enemy.x) - fixedToNumber(missile.x), arenaWidth);
+  const dy = getWrappedDelta(fixedToNumber(enemy.y) - fixedToNumber(missile.y), arenaHeight);
+  return Math.hypot(dx, dy) > NURTIP_AI_RELEASE_RADIUS;
+}
+
 function getPlanetAvoidanceAim(ship: ShipState, state: GameState, pursuitAim: AimSolution): Angle | null {
   const arenaWidth = fixedToNumber(state.arena.width);
   const arenaHeight = fixedToNumber(state.arena.height);
@@ -259,6 +288,8 @@ function getShotDistance(ship: ShipState): number {
       return 700;
     case 'krab':
       return ship.custom.krabLongRange ? 725 : 250;
+    case 'nurtip':
+      return 850;
     default:
       return fixedToNumber(SHOT_DISTANCE);
   }
@@ -278,6 +309,8 @@ function getShotLeadFrames(ship: ShipState): number {
       return 70;
     case 'krab':
       return 25;
+    case 'nurtip':
+      return 100;
     default:
       return SHOT_LEAD_FRAMES;
   }
@@ -312,6 +345,9 @@ function shouldUseSpecial(ship: ShipState, enemy: ShipState, distance: number, s
     }
     case 'pscout':
       return shouldPScoutUseSpecial(ship, enemy, state);
+    case 'nurtip':
+      // Reference Nurtip::TryUseSpecial pops a rock at random with low odds (~1/1000 frames).
+      return distance < 600;
     default:
       return false;
   }

@@ -1,13 +1,20 @@
 {
-  "generatedAt": "2026-05-03T18:35:35.342Z",
+  "generatedAt": "2026-05-05T14:47:39.977Z",
   "root": "art",
-  "fileCount": 72,
+  "fileCount": 80,
   "files": [
     {
       "name": "admiral.jpg",
       "ext": ".jpg",
       "relativePath": "art/admiral.jpg",
       "sizeBytes": 123320,
+      "kind": "image"
+    },
+    {
+      "name": "asteroidbrown.png",
+      "ext": ".png",
+      "relativePath": "art/asteroidbrown.png",
+      "sizeBytes": 75660,
       "kind": "image"
     },
     {
@@ -288,6 +295,55 @@
       "ext": ".png",
       "relativePath": "art/nameglass.png",
       "sizeBytes": 6797,
+      "kind": "image"
+    },
+    {
+      "name": "nurtip.png",
+      "ext": ".png",
+      "relativePath": "art/nurtip.png",
+      "sizeBytes": 34698,
+      "kind": "image"
+    },
+    {
+      "name": "nurtiplaser.png",
+      "ext": ".png",
+      "relativePath": "art/nurtiplaser.png",
+      "sizeBytes": 7260,
+      "kind": "image"
+    },
+    {
+      "name": "nurtiplaser1.png",
+      "ext": ".png",
+      "relativePath": "art/nurtiplaser1.png",
+      "sizeBytes": 7179,
+      "kind": "image"
+    },
+    {
+      "name": "nurtipname.png",
+      "ext": ".png",
+      "relativePath": "art/nurtipname.png",
+      "sizeBytes": 3982,
+      "kind": "image"
+    },
+    {
+      "name": "nurtipportrait.jpg",
+      "ext": ".jpg",
+      "relativePath": "art/nurtipportrait.jpg",
+      "sizeBytes": 100914,
+      "kind": "image"
+    },
+    {
+      "name": "nurtipshotframes.png",
+      "ext": ".png",
+      "relativePath": "art/nurtipshotframes.png",
+      "sizeBytes": 27725,
+      "kind": "image"
+    },
+    {
+      "name": "nurtipsplosionframes.png",
+      "ext": ".png",
+      "relativePath": "art/nurtipsplosionframes.png",
+      "sizeBytes": 180571,
       "kind": "image"
     },
     {

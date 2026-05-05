@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { fixed, fixedFromInt } from '../sim/fixed';
 import { createInitialState } from '../sim/state';
+import { stepGame } from '../sim/step';
 import { angle } from '../sim/trig';
 import { InputBits, type ProjectileState } from '../sim/types';
 import { fastForwardProjectile, OwnerAuthoritySession } from './rollback';
@@ -84,6 +85,40 @@ describe('owner authority session', () => {
     expect(caughtUp?.ttl).toBe(47);
     expect(caughtUp?.vy).not.toBe(projectile.vy);
     expect(caughtUp?.y).not.toBe(projectile.y);
+  });
+
+  it('uses Nurtip asteroid orbit motion during projectile catch-up', () => {
+    const initialState = createInitialState(99, ['nurtip', 'frog']);
+    const frozenOwnerState = {
+      ...initialState,
+      ships: [
+        { ...initialState.ships[0], freezeFrames: 999 },
+        initialState.ships[1],
+      ],
+    };
+    const fired = stepGame(frozenOwnerState, [InputBits.FireSecondary, 0]);
+    const spawned = fired.projectiles.find((projectile) => projectile.kind === 'nurtipAsteroid');
+    expect(spawned).toBeDefined();
+    if (!spawned) {
+      return;
+    }
+
+    let expectedState = fired;
+    for (let frame = 0; frame < 3; frame += 1) {
+      expectedState = stepGame(expectedState, [0, 0]);
+    }
+
+    const expected = expectedState.projectiles.find((projectile) => projectile.id === spawned.id);
+    const caughtUp = fastForwardProjectile(spawned, 3, expectedState);
+
+    expect(caughtUp).toMatchObject({
+      x: expected?.x,
+      y: expected?.y,
+      vx: expected?.vx,
+      vy: expected?.vy,
+      ttl: expected?.ttl,
+      angle: expected?.angle,
+    });
   });
 
   it('applies remote Frog charge weapon events for visual prediction', () => {

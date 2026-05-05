@@ -51,6 +51,15 @@ const GOOJ_JUNK_SHOT_VARIANCE_RADIANS = 0.1;
 const GOOJ_JUNK_VARIETIES = 7;
 const PSCOUT_BEAM_FRAMES = 200;
 const PSCOUT_BEAM_DAMAGE_FRAME = 50;
+// Nurtip remote-detonation primary: tap to launch, hold to cruise, release to AOE-detonate.
+export const NURTIP_DETONATION_RADIUS = fixedFromInt(150);
+export const NURTIP_DETONATION_DAMAGE = 2;
+export const NURTIP_EXPLOSION_LIFE = 32;
+// Nurtip orbiting asteroid secondary: spawns at the ship and drifts outward up to a fixed orbit radius.
+const NURTIP_ASTEROID_MAX_DIST = 140;
+const NURTIP_ASTEROID_DRIFT_RATE = 2;
+const NURTIP_ASTEROID_SPIN_RATE = 0.02;
+const NURTIP_ASTEROID_SLIDE_RATE = 0.05;
 const CANNONADE_SECONDARY_RELOAD_FRAMES = Math.round(0.25 * 60);
 const CANNONADE_SECONDARY_ACTIVE_COOLDOWN = 1;
 const SHIP_EXPLOSION_PARTICLE_COUNT = 3;
@@ -98,6 +107,8 @@ interface ShipStepResult {
   readonly damageEffects: readonly DamageEffect[];
   readonly freezeEffects: readonly FreezeEffect[];
   readonly clearEnemyBeacons?: number;
+  readonly removedProjectileIds?: readonly number[];
+  readonly nurtipDetonations?: readonly { readonly x: Fixed; readonly y: Fixed }[];
   readonly rngSeed: RngSeed;
   readonly nextProjectileId: number;
   readonly nextActorId: number;
@@ -121,6 +132,8 @@ export function stepGame(state: GameState, inputs: FrameInputs): GameState {
   const damageEffects: DamageEffect[] = [];
   const freezeEffects: FreezeEffect[] = [];
   const clearBeaconsFor = new Set<number>();
+  const removedProjectileIds = new Set<number>();
+  const nurtipDetonations: { x: Fixed; y: Fixed }[] = [];
 
   const ships = state.ships.map((ship, index) => {
     const result = stepShip(ship, inputs[index] ?? 0, state, rngSeed, nextProjectileId, nextActorId);
@@ -131,6 +144,14 @@ export function stepGame(state: GameState, inputs: FrameInputs): GameState {
     freezeEffects.push(...result.freezeEffects);
     if (result.clearEnemyBeacons !== undefined) {
       clearBeaconsFor.add(result.clearEnemyBeacons);
+    }
+    if (result.removedProjectileIds) {
+      for (const id of result.removedProjectileIds) {
+        removedProjectileIds.add(id);
+      }
+    }
+    if (result.nurtipDetonations) {
+      nurtipDetonations.push(...result.nurtipDetonations);
     }
     rngSeed = result.rngSeed;
     nextProjectileId = ownerProjectiles.nextProjectileId;
@@ -158,7 +179,11 @@ export function stepGame(state: GameState, inputs: FrameInputs): GameState {
 
   let affectedShips = applyEffects(ships, damageEffects, freezeEffects, clearBeaconsFor);
   let actors = updateActors([...state.actors, ...spawnedActors], affectedShips, clearBeaconsFor);
-  const projectilesBeforeResolution = [...state.projectiles, ...spawned];
+  const survivingPriorProjectiles =
+    removedProjectileIds.size > 0
+      ? state.projectiles.filter((projectile) => !removedProjectileIds.has(projectile.id))
+      : state.projectiles;
+  const projectilesBeforeResolution = [...survivingPriorProjectiles, ...spawned];
   const movedProjectiles = projectilesBeforeResolution
     .map((projectile) => stepProjectile(projectile, { ...state, ships: affectedShips, actors }, rngSeed))
     .filter((projectile) => projectile.active);
@@ -171,7 +196,28 @@ export function stepGame(state: GameState, inputs: FrameInputs): GameState {
   const deathSpawn = spawnShipExplosionEffects(state.ships, affectedShips, nextEffectId, rngSeed);
   nextEffectId = deathSpawn.nextEffectId;
   rngSeed = deathSpawn.rngSeed;
-  const effects = [...stepEffects(state.effects, state.arena), ...thrustDustEffects, ...deathSpawn.effects];
+  const nurtipExplosionEffects: EffectState[] = [];
+  for (const detonation of nurtipDetonations) {
+    nurtipExplosionEffects.push({
+      id: nextEffectId,
+      kind: 'nurtipExplosion',
+      ownerId: -1,
+      x: detonation.x,
+      y: detonation.y,
+      vx: fixed(0),
+      vy: fixed(0),
+      scale: fixed(1),
+      life: NURTIP_EXPLOSION_LIFE,
+      maxLife: NURTIP_EXPLOSION_LIFE,
+    });
+    nextEffectId += 1;
+  }
+  const effects = [
+    ...stepEffects(state.effects, state.arena),
+    ...thrustDustEffects,
+    ...deathSpawn.effects,
+    ...nurtipExplosionEffects,
+  ];
 
   return {
     ...state,
@@ -335,9 +381,21 @@ function stepShip(
   const actors: ActorState[] = [];
   const damageEffects: DamageEffect[] = [];
   const freezeEffects: FreezeEffect[] = [];
+  const removedProjectileIds: number[] = [];
+  const nurtipDetonations: { x: Fixed; y: Fixed }[] = [];
   let clearEnemyBeacons: number | undefined;
   let nextProjectileId = projectileId;
   let nextActorId = actorId;
+
+  // If a Nurtip primary missile died last frame (collision / TTL), free the launcher.
+  if (ship.shipId === 'nurtip' && custom.nurtipPrimaryArmed) {
+    const stillFlying = state.projectiles.some(
+      (projectile) => projectile.active && projectile.kind === 'nurtipMissile' && projectile.ownerId === ship.id,
+    );
+    if (!stillFlying) {
+      custom = { ...custom, nurtipPrimaryArmed: false };
+    }
+  }
 
   if (batteryChargeFrame >= baseSpec.batteryChargeFrames) {
     battery = Math.min(baseSpec.battery, battery + 1);
@@ -477,6 +535,27 @@ function stepShip(
     custom = { ...custom, frogCharge: 0, frogChargeTime: 0 };
   } else if (ship.shipId === 'frog') {
     custom = { ...custom, frogChargeTime: 0 };
+  } else if (ship.shipId === 'nurtip' && custom.nurtipPrimaryArmed) {
+    // Reference: releasing primary detonates the in-flight torpedo as a 150-radius AOE for 2 dmg.
+    const missile = state.projectiles.find(
+      (projectile) => projectile.active && projectile.kind === 'nurtipMissile' && projectile.ownerId === ship.id,
+    );
+    if (missile) {
+      const radiusSq = fixedSquared(NURTIP_DETONATION_RADIUS);
+      for (const candidate of state.ships) {
+        if (candidate.id === ship.id || !candidate.alive) {
+          continue;
+        }
+        const dx = wrappedDelta(candidate.x, missile.x, state.arena.width);
+        const dy = wrappedDelta(candidate.y, missile.y, state.arena.height);
+        if (fixedAdd(fixedSquared(dx), fixedSquared(dy)) <= radiusSq) {
+          damageEffects.push({ targetId: candidate.id, sourceId: ship.id, damage: NURTIP_DETONATION_DAMAGE });
+        }
+      }
+      removedProjectileIds.push(missile.id);
+      nurtipDetonations.push({ x: missile.x, y: missile.y });
+    }
+    custom = { ...custom, nurtipPrimaryArmed: false };
   }
 
   if (ship.shipId === 'voskum') {
@@ -537,6 +616,8 @@ function stepShip(
     damageEffects,
     freezeEffects,
     clearEnemyBeacons,
+    removedProjectileIds: removedProjectileIds.length > 0 ? removedProjectileIds : undefined,
+    nurtipDetonations: nurtipDetonations.length > 0 ? nurtipDetonations : undefined,
     rngSeed,
     nextProjectileId,
     nextActorId,
@@ -739,7 +820,11 @@ function clampVelocity(vx: Fixed, vy: Fixed, maxSpeed: Fixed): { readonly vx: Fi
   };
 }
 
-function stepProjectile(projectile: ProjectileState, state: GameState, rngSeed: RngSeed): ProjectileState {
+export function stepProjectile(projectile: ProjectileState, state: GameState, rngSeed: RngSeed): ProjectileState {
+  if (projectile.kind === 'nurtipAsteroid') {
+    return updateNurtipAsteroid(projectile, state);
+  }
+
   const steered = projectile.trackPct > 0 ? steerProjectile(projectile, state, rngSeed) : projectile;
   const x = wrapSignedFixed(fixedAdd(steered.x, steered.vx), state.arena.width);
   const y = wrapSignedFixed(fixedAdd(steered.y, steered.vy), state.arena.height);
@@ -753,6 +838,64 @@ function stepProjectile(projectile: ProjectileState, state: GameState, rngSeed: 
     rotation: fixedAdd(steered.rotation, fixed(0.2)),
     active: ttl > 0 && !isInsidePlanet(x, y, state.planet.radius, state),
   };
+}
+
+function updateNurtipAsteroid(projectile: ProjectileState, state: GameState): ProjectileState {
+  const owner = state.ships[projectile.ownerId];
+  const ttl = projectile.ttl - 1;
+  if (!owner?.alive || ttl <= 0) {
+    return { ...projectile, ttl, active: false };
+  }
+
+  // Reference Nurtip::UpdateTorp: distance ramps from 0 up to 140 over the first frames of life,
+  // and the rock then orbits around the owner with a slow angular drift.
+  const ownerSpec = getShipSpec(owner.shipId);
+  const launchTtl = ownerSpec.secondary.ttl;
+  const framesSinceLaunch = Math.max(0, launchTtl - ttl);
+  const driftDist = Math.min(NURTIP_ASTEROID_MAX_DIST, framesSinceLaunch * NURTIP_ASTEROID_DRIFT_RATE);
+
+  const baseAngle = Math.atan2(fixedToNumber(projectile.vy), fixedToNumber(projectile.vx));
+  const targetAngle = getNurtipAsteroidTargetAngle(projectile, state);
+  const newAngle = framesSinceLaunch <= 1 ? targetAngle : slideRadians(baseAngle, targetAngle, NURTIP_ASTEROID_SLIDE_RATE);
+  const cos = Math.cos(newAngle);
+  const sin = Math.sin(newAngle);
+
+  const newX = wrapSignedFixed(fixedAdd(owner.x, fixedMul(fixed(driftDist), fixed(cos))), state.arena.width);
+  const newY = wrapSignedFixed(fixedAdd(owner.y, fixedMul(fixed(driftDist), fixed(sin))), state.arena.height);
+
+  return {
+    ...projectile,
+    x: newX,
+    y: newY,
+    vx: fixed(cos),
+    vy: fixed(sin),
+    angle: angle(Math.round((newAngle / (Math.PI * 2)) * ANGLE_STEPS)),
+    rotation: fixedAdd(projectile.rotation, fixed(0.2)),
+    ttl,
+    active: !isInsidePlanet(newX, newY, state.planet.radius, state),
+  };
+}
+
+function getNurtipAsteroidTargetAngle(projectile: ProjectileState, state: GameState): number {
+  const siblings = state.projectiles
+    .filter((candidate) => candidate.active && candidate.kind === 'nurtipAsteroid' && candidate.ownerId === projectile.ownerId)
+    .map((candidate) => candidate.id);
+  if (!siblings.includes(projectile.id)) {
+    siblings.push(projectile.id);
+  }
+  siblings.sort((left, right) => left - right);
+
+  const slotCount = Math.max(1, siblings.length);
+  const slotIndex = Math.max(0, siblings.indexOf(projectile.id));
+  return ((Math.PI * 2) * slotIndex) / slotCount + state.frame * NURTIP_ASTEROID_SPIN_RATE;
+}
+
+function slideRadians(current: number, target: number, maxStep: number): number {
+  const delta = clampRadians(target - current);
+  if (Math.abs(delta) <= maxStep) {
+    return current + delta;
+  }
+  return current + Math.sign(delta) * maxStep;
 }
 
 function resolveProjectileHits(
@@ -1025,6 +1168,15 @@ function firePrimary(
         }
       }
       break;
+    case 'nurtip':
+      // Reference Nurtip::ShootMainWeapon: launch a slow torpedo and lock out new shots until released.
+      if (custom.nurtipPrimaryArmed) {
+        return { actors, projectiles, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
+      }
+      projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, context.x, context.y, context.shipAngle));
+      nextProjectileId += 1;
+      custom = { ...custom, nurtipPrimaryArmed: true };
+      break;
     default:
       projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, context.x, context.y, context.shipAngle));
       nextProjectileId += 1;
@@ -1164,6 +1316,11 @@ function fireSecondary(
       }
       custom = { ...custom, pscoutBeamFrames: PSCOUT_BEAM_FRAMES, pscoutBeamStrength: beaconCount };
       clearEnemyBeacons = enemy.id;
+      break;
+    }
+    case 'nurtip': {
+      projectiles.push(spawn(nextProjectileId, ship.id, spec.secondary, context.x, context.y, angle(0)));
+      nextProjectileId += 1;
       break;
     }
   }
@@ -1374,6 +1531,12 @@ function steerProjectile(projectile: ProjectileState, state: GameState, rngSeed:
     vy: fixedMul(fixed(Math.sin(nextAngle)), speed),
     angle: angle(Math.round((nextAngle / (Math.PI * 2)) * ANGLE_STEPS)),
   };
+}
+
+export function isNurtipDetonationHitting(x: Fixed, y: Fixed, defender: ShipState, state: GameState): boolean {
+  const dx = wrappedDelta(defender.x, x, state.arena.width);
+  const dy = wrappedDelta(defender.y, y, state.arena.height);
+  return fixedAdd(fixedSquared(dx), fixedSquared(dy)) <= fixedSquared(NURTIP_DETONATION_RADIUS);
 }
 
 export function isKronBeamHitting(x: Fixed, y: Fixed, facing: Angle, enemy: ShipState, state: GameState): boolean {

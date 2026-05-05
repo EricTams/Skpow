@@ -47,6 +47,7 @@ export type OwnerWeaponEffectKind =
   | 'voskumBlink'
   | 'zizlikNode'
   | 'pscoutBeam'
+  | 'nurtipDetonate'
   | 'generic';
 
 export interface OwnerWeaponEventPacket {
@@ -477,6 +478,7 @@ function isOwnerWeaponEffect(value: string): value is OwnerWeaponEffectKind {
     value === 'voskumBlink' ||
     value === 'zizlikNode' ||
     value === 'pscoutBeam' ||
+    value === 'nurtipDetonate' ||
     value === 'generic'
   );
 }
@@ -490,7 +492,8 @@ function isShipId(value: unknown): value is ShipId {
     value === 'pscout' ||
     value === 'kron' ||
     value === 'gooj' ||
-    value === 'krab'
+    value === 'krab' ||
+    value === 'nurtip'
   );
 }
 

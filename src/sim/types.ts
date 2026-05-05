@@ -49,6 +49,8 @@ export interface ShipCustomState {
   readonly voskumTeleportAngles?: readonly Angle[];
   readonly turnAccumulator?: Fixed;
   readonly cannonTurnAccumulator?: Fixed;
+  // True while a Nurtip primary missile is in flight; cleared on detonation or natural death.
+  readonly nurtipPrimaryArmed?: boolean;
 }
 
 export type ActorKind = 'zizlikNode' | 'goojBackNode' | 'pscoutBeacon';
@@ -67,7 +69,7 @@ export interface ActorState {
   readonly active: boolean;
 }
 
-export type EffectKind = 'shipExplosion' | 'thrustDust';
+export type EffectKind = 'shipExplosion' | 'thrustDust' | 'nurtipExplosion';
 
 export interface EffectState {
   readonly id: number;

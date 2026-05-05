@@ -115,6 +115,30 @@ export const legacyAssets = {
     relativePath: 'art/crabshots.png',
     url: new URL('../../art/crabshots.png', import.meta.url).href,
   },
+  nurtipShip: {
+    relativePath: 'art/nurtip.png',
+    url: new URL('../../art/nurtip.png', import.meta.url).href,
+  },
+  nurtipBarrel1: {
+    relativePath: 'art/nurtiplaser.png',
+    url: new URL('../../art/nurtiplaser.png', import.meta.url).href,
+  },
+  nurtipBarrel2: {
+    relativePath: 'art/nurtiplaser1.png',
+    url: new URL('../../art/nurtiplaser1.png', import.meta.url).href,
+  },
+  nurtipMissile: {
+    relativePath: 'art/nurtipshotframes.png',
+    url: new URL('../../art/nurtipshotframes.png', import.meta.url).href,
+  },
+  nurtipExplosion: {
+    relativePath: 'art/nurtipsplosionframes.png',
+    url: new URL('../../art/nurtipsplosionframes.png', import.meta.url).href,
+  },
+  nurtipAsteroid: {
+    relativePath: 'art/asteroidbrown.png',
+    url: new URL('../../art/asteroidbrown.png', import.meta.url).href,
+  },
   mainScreen: {
     relativePath: 'art/mainscreen.jpg',
     url: new URL('../../art/mainscreen.jpg', import.meta.url).href,
@@ -190,6 +214,10 @@ export const legacyAssets = {
   krabName: {
     relativePath: 'art/krabname.png',
     url: new URL('../../art/krabname.png', import.meta.url).href,
+  },
+  nurtipName: {
+    relativePath: 'art/nurtipname.png',
+    url: new URL('../../art/nurtipname.png', import.meta.url).href,
   },
   planet: {
     relativePath: 'art/planets.png',
@@ -274,6 +302,10 @@ export const legacyAssets = {
   krabPortrait: {
     relativePath: 'art/krab_pic.jpg',
     url: new URL('../../art/krab_pic.jpg', import.meta.url).href,
+  },
+  nurtipPortrait: {
+    relativePath: 'art/nurtipportrait.jpg',
+    url: new URL('../../art/nurtipportrait.jpg', import.meta.url).href,
   },
   frogShot: {
     relativePath: 'art/frogshot.png',

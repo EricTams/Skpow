@@ -3,7 +3,7 @@ import type { ShipId } from '../sim/shipSpecs';
 import { InputBits, type GameState } from '../sim/types';
 import type { Fixed } from '../sim/fixed';
 import type { Angle } from '../sim/trig';
-import { isKronBeamHitting } from '../sim/step';
+import { isKronBeamHitting, isNurtipDetonationHitting, NURTIP_DETONATION_DAMAGE } from '../sim/step';
 import {
   decodeGameplayPacket,
   encodeDefenderHitPacket,
@@ -210,7 +210,7 @@ export class NetworkMatchSession {
     }
 
     const previousState = this.ownerSession.currentState;
-    const remoteInput = this.remoteThrusting ? InputBits.Thrust : 0;
+    const remoteInput = computeRemoteInput(previousState, this.localPlayerIndex, this.remoteThrusting);
     const result = this.ownerSession.step(localInput, remoteInput);
     this.queueOwnerState(result.state, localInput);
     this.queueProjectileSpawns(previousState, result.state);
@@ -495,6 +495,7 @@ export class NetworkMatchSession {
     this.lastWeaponEventFrame = Math.max(this.lastWeaponEventFrame ?? packet.frame, packet.frame);
     this.applyRemoteWeaponEvent(packet);
     this.queueKronBeamDefenderHit(packet);
+    this.queueNurtipDetonateDefenderHit(packet);
     this.sessionError = null;
   }
 
@@ -595,6 +596,55 @@ export class NetworkMatchSession {
       defenderId: this.localPlayerIndex,
       attackerId: packet.ownerId,
       projectileId: 0,
+      damage,
+      crew,
+      alive,
+    };
+    this.recentLocalDefenderHits.unshift(hitPacket);
+    this.recentLocalDefenderHits.length = Math.min(this.recentLocalDefenderHits.length, DEFENDER_HIT_RESEND_COUNT);
+    this.outgoingPackets.push(encodeDefenderHitPacket(hitPacket));
+    this.lastDefenderHitFrame = Math.max(this.lastDefenderHitFrame ?? state.frame, state.frame);
+  }
+
+  private queueNurtipDetonateDefenderHit(packet: OwnerWeaponEventPacket): void {
+    if (packet.effectKind !== 'nurtipDetonate' || packet.ownerId === this.localPlayerIndex || !this.ownerSession) {
+      return;
+    }
+
+    const state = this.ownerSession.currentState;
+    const defender = state.ships[this.localPlayerIndex];
+    if (!defender?.alive) {
+      return;
+    }
+
+    if (!isNurtipDetonationHitting(packet.x as Fixed, packet.y as Fixed, defender, state)) {
+      return;
+    }
+
+    const damage = NURTIP_DETONATION_DAMAGE;
+    const crew = Math.max(0, defender.crew - damage);
+    const alive = crew > 0;
+    const hitId = `${this.localPlayerIndex}:nurtipDetonate:${packet.eventId}`;
+    if (this.processedDefenderHitIds.has(hitId)) {
+      return;
+    }
+
+    // The owner already removed the missile from their copy; the receiver does the same here
+    // so both peers' projectile lists stay aligned without needing a dedicated removal packet.
+    const missile = state.projectiles.find(
+      (projectile) => projectile.active && projectile.kind === 'nurtipMissile' && projectile.ownerId === packet.ownerId,
+    );
+    const projectileId = missile?.id ?? 0;
+
+    this.processedDefenderHitIds.add(hitId);
+    this.ownerSession.applyDefenderHit(this.localPlayerIndex, projectileId, crew, alive);
+    const hitPacket: DefenderHitPacket = {
+      roundId: this.activeRoundId,
+      hitId,
+      frame: state.frame,
+      defenderId: this.localPlayerIndex,
+      attackerId: packet.ownerId,
+      projectileId,
       damage,
       crew,
       alive,
@@ -789,9 +839,48 @@ export class NetworkMatchSession {
     if (isFrogChargeRelease(previousShip, ship, localProjectileSpawned)) {
       this.queueWeaponEvent(previousShip, ship, nextState, 'primary', 'frogChargeRelease');
     }
+    if (isNurtipDetonate(previousShip, ship)) {
+      this.queueNurtipDetonateEvent(previousShip, ship, previousState, nextState);
+    }
     this.queueWeaponEventForInput(previousShip, ship, nextState, localInput, 'primary', localProjectileSpawned);
     this.queueWeaponEventForInput(previousShip, ship, nextState, localInput, 'secondary', localProjectileSpawned);
     this.recentLocalWeaponEvents.length = Math.min(this.recentLocalWeaponEvents.length, WEAPON_EVENT_RESEND_COUNT);
+  }
+
+  private queueNurtipDetonateEvent(
+    previousShip: GameState['ships'][number],
+    ship: GameState['ships'][number],
+    previousState: GameState,
+    nextState: GameState,
+  ): void {
+    // The missile was alive in the pre-step state and removed by the detonation branch in
+    // stepShip; its position there is exactly where the AOE should be centered.
+    const missile = previousState.projectiles.find(
+      (projectile) => projectile.active && projectile.kind === 'nurtipMissile' && projectile.ownerId === ship.id,
+    );
+    if (!missile) {
+      return;
+    }
+    const eventId = `${this.localPlayerIndex}:${nextState.frame}:primary:nurtipDetonate`;
+    if (this.processedWeaponEventIds.has(eventId)) {
+      return;
+    }
+    const packet: OwnerWeaponEventPacket = {
+      roundId: this.activeRoundId,
+      eventId,
+      frame: nextState.frame,
+      ownerId: this.localPlayerIndex,
+      weapon: 'primary',
+      effectKind: 'nurtipDetonate',
+      x: missile.x,
+      y: missile.y,
+      vx: 0 as Fixed,
+      vy: 0 as Fixed,
+      angle: ship.angle,
+    };
+    this.processedWeaponEventIds.add(eventId);
+    this.recentLocalWeaponEvents.unshift(packet);
+    void previousShip;
   }
 
   private queueWeaponEventForInput(
@@ -849,6 +938,22 @@ export class NetworkMatchSession {
 
 function readError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+// Some primary weapons (currently only the Nurtip torpedo) hold the FirePrimary bit
+// across many frames on the owner's machine, gated by ship.custom flags. Without
+// FirePrimary in the remote-replay input, the owner-replayed branch in stepShip would
+// see "armed && !FirePrimary" and trigger spuriously every frame on the receiver. We
+// reconstruct the missing bit from the synced ship state so firePrimary's armed-guard
+// short-circuits and the release branch never fires on the receiver. Actual detonation
+// is delivered via the OwnerWeaponEvent packet (see queueWeaponEvents).
+function computeRemoteInput(state: GameState, localPlayerIndex: PlayerIndex, remoteThrusting: boolean): number {
+  let input = remoteThrusting ? InputBits.Thrust : 0;
+  const remoteShip = state.ships[localPlayerIndex === 0 ? 1 : 0];
+  if (remoteShip?.shipId === 'nurtip' && remoteShip.alive && Boolean(remoteShip.custom.nurtipPrimaryArmed)) {
+    input |= InputBits.FirePrimary;
+  }
+  return input;
 }
 
 function isPlayerIndex(value: number): value is PlayerIndex {
@@ -958,4 +1063,13 @@ function isFrogChargeRelease(
   localProjectileSpawned: boolean,
 ): boolean {
   return ship.shipId === 'frog' && localProjectileSpawned && (previousShip.custom.frogCharge ?? 0) > 0 && (ship.custom.frogCharge ?? 0) === 0;
+}
+
+function isNurtipDetonate(
+  previousShip: GameState['ships'][number],
+  ship: GameState['ships'][number],
+): boolean {
+  return ship.shipId === 'nurtip'
+    && Boolean(previousShip.custom.nurtipPrimaryArmed)
+    && !ship.custom.nurtipPrimaryArmed;
 }

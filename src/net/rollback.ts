@@ -1,9 +1,9 @@
 import type { Fixed } from '../sim/fixed';
 import { fixedAdd, fixedMul, fixedSub, fixed, fixedSquared, fixedSqrt, fixedToNumber } from '../sim/fixed';
 import { getShipSpec } from '../sim/shipSpecs';
-import { stepGame } from '../sim/step';
+import { NURTIP_EXPLOSION_LIFE, stepGame, stepProjectile } from '../sim/step';
 import { ANGLE_STEPS, angle } from '../sim/trig';
-import type { ActorState, ArenaState, GameState, ProjectileState, ShipState } from '../sim/types';
+import type { ActorState, ArenaState, EffectState, GameState, ProjectileState, ShipState } from '../sim/types';
 import type { OwnerWeaponEventPacket } from './protocol';
 
 export type PlayerIndex = 0 | 1;
@@ -85,6 +85,39 @@ export class OwnerAuthoritySession {
     const ship = this.state.ships[packet.ownerId];
     if (!ship) {
       return false;
+    }
+
+    // Nurtip detonation packets carry the missile's position rather than the ship's, so we
+    // skip fastForwardShip (which would warp the owner ship onto the missile) and apply
+    // detonation-only effects: clear the armed flag, remove the missile, spawn the boom.
+    if (packet.effectKind === 'nurtipDetonate') {
+      const nextShipForDetonate: ShipState = {
+        ...ship,
+        custom: { ...ship.custom, nurtipPrimaryArmed: false },
+      };
+      const projectiles = this.state.projectiles.filter(
+        (projectile) => !(projectile.kind === 'nurtipMissile' && projectile.ownerId === packet.ownerId),
+      );
+      const explosion: EffectState = {
+        id: this.state.nextEffectId,
+        kind: 'nurtipExplosion',
+        ownerId: -1,
+        x: packet.x as Fixed,
+        y: packet.y as Fixed,
+        vx: 0 as Fixed,
+        vy: 0 as Fixed,
+        scale: fixed(1),
+        life: NURTIP_EXPLOSION_LIFE,
+        maxLife: NURTIP_EXPLOSION_LIFE,
+      };
+      this.state = {
+        ...this.state,
+        ships: this.state.ships.map((candidate) => (candidate.id === packet.ownerId ? nextShipForDetonate : candidate)),
+        projectiles,
+        effects: [...this.state.effects, explosion],
+        nextEffectId: this.state.nextEffectId + 1,
+      };
+      return true;
     }
 
     const baseShip = fastForwardShip(
@@ -208,6 +241,16 @@ export function fastForwardShip(ship: ShipState, frames: number, arena: ArenaSta
 export function fastForwardProjectile(projectile: ProjectileState, frames: number, state: GameState): ProjectileState | null {
   if (frames <= 0) {
     return projectile.active && projectile.ttl > 0 ? projectile : null;
+  }
+
+  if (projectile.kind === 'nurtipAsteroid') {
+    let next: ProjectileState | null = projectile;
+    const startFrame = Math.max(0, state.frame - frames);
+    for (let frame = 0; frame < frames && next; frame += 1) {
+      const stepped = stepProjectile(next, { ...state, frame: startFrame + frame }, state.rngSeed);
+      next = stepped.active && stepped.ttl > 0 ? stepped : null;
+    }
+    return next;
   }
 
   if (projectile.trackPct <= 0) {
