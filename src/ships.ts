@@ -30,7 +30,7 @@ export const SHIP_CATALOG: readonly ShipCatalogEntry[] = [
   {
     id: 'frog',
     name: 'Frog',
-    cost: 40,
+    cost: 30,
     crew: SHIP_SPECS.frog.crew,
     battery: SHIP_SPECS.frog.battery,
     render: {
@@ -50,7 +50,7 @@ export const SHIP_CATALOG: readonly ShipCatalogEntry[] = [
   {
     id: 'cannonade',
     name: 'Cannonade',
-    cost: 60,
+    cost: 24,
     crew: SHIP_SPECS.cannonade.crew,
     battery: SHIP_SPECS.cannonade.battery,
     render: {
@@ -71,7 +71,7 @@ export const SHIP_CATALOG: readonly ShipCatalogEntry[] = [
   {
     id: 'zizlik',
     name: 'Zizlik',
-    cost: 40,
+    cost: 10,
     crew: SHIP_SPECS.zizlik.crew,
     battery: SHIP_SPECS.zizlik.battery,
     render: {
@@ -92,7 +92,7 @@ export const SHIP_CATALOG: readonly ShipCatalogEntry[] = [
   {
     id: 'voskum',
     name: 'Voskum',
-    cost: 50,
+    cost: 20,
     crew: SHIP_SPECS.voskum.crew,
     battery: SHIP_SPECS.voskum.battery,
     render: {
@@ -111,7 +111,7 @@ export const SHIP_CATALOG: readonly ShipCatalogEntry[] = [
   {
     id: 'pscout',
     name: 'pScout',
-    cost: 40,
+    cost: 8,
     crew: SHIP_SPECS.pscout.crew,
     battery: SHIP_SPECS.pscout.battery,
     render: {
@@ -130,7 +130,7 @@ export const SHIP_CATALOG: readonly ShipCatalogEntry[] = [
   {
     id: 'kron',
     name: 'Kron',
-    cost: 50,
+    cost: 20,
     crew: SHIP_SPECS.kron.crew,
     battery: SHIP_SPECS.kron.battery,
     render: {
@@ -149,7 +149,7 @@ export const SHIP_CATALOG: readonly ShipCatalogEntry[] = [
   {
     id: 'gooj',
     name: 'Gooj',
-    cost: 60,
+    cost: 14,
     crew: SHIP_SPECS.gooj.crew,
     battery: SHIP_SPECS.gooj.battery,
     render: {
@@ -168,7 +168,7 @@ export const SHIP_CATALOG: readonly ShipCatalogEntry[] = [
   {
     id: 'nurtip',
     name: 'Nurtip',
-    cost: 60,
+    cost: 40,
     crew: SHIP_SPECS.nurtip.crew,
     battery: SHIP_SPECS.nurtip.battery,
     render: {
@@ -187,7 +187,7 @@ export const SHIP_CATALOG: readonly ShipCatalogEntry[] = [
   {
     id: 'krab',
     name: 'Krab',
-    cost: 50,
+    cost: 20,
     crew: SHIP_SPECS.krab.crew,
     battery: SHIP_SPECS.krab.battery,
     render: {

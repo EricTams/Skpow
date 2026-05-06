@@ -1,6 +1,6 @@
 import './style.css';
 
-import { bindKeyboard, readInputDeviceStatus, readLocalInputs, readPrimaryLocalInput } from './input';
+import { MenuInputBits, bindKeyboard, readGamepadMenuInput, readInputDeviceStatus, readLocalInputs, readPrimaryLocalInput } from './input';
 import { createFixedLoop, SIM_FPS } from './loop';
 import { getFirebaseClient, isFirebaseConfigured, observeAnonymousUser, signInWithAnonymousAuth } from './net/firebase';
 import { getLobbyKind, LobbyRepository, type LobbyKind, type LobbyRecord } from './net/lobby';
@@ -29,6 +29,8 @@ const AI_DEMO_ROUND_FRAMES = 30 * SIM_FPS;
 const NETWORK_CORRECTION_BLEND_FRAMES = 5;
 const LAGGY_MP_BUDGET = 100;
 const LAGGY_MP_FIND_TIMEOUT_MS = 1500;
+const MAX_FLEET_SLOTS = 14;
+const FLEET_NAV_REPEAT_FRAMES = 10;
 
 interface FleetShip {
   readonly uid: string;
@@ -81,6 +83,12 @@ type AppPhase =
   | { readonly name: 'networkResult'; readonly winnerId: number };
 
 type MatchLoadout = readonly [ShipCatalogId, ShipCatalogId];
+type FleetBuilderNavDirection = 'up' | 'down' | 'left' | 'right';
+
+interface FleetBuilderNavTarget {
+  readonly nav: string;
+  readonly index: number;
+}
 
 let appPhase: AppPhase = { name: 'loading' };
 let state: GameState = createInitialState();
@@ -110,6 +118,11 @@ let presentationCorrection: PresentationCorrection | null = null;
 let suppressPeerDisconnectPopup = false;
 let pauseMenuOpen = false;
 let lastRenderedPhaseName: AppPhase['name'] | null = null;
+let fleetBuilderNavTarget: FleetBuilderNavTarget | null = null;
+let fleetBuilderPickingSlotIndex: number | null = null;
+let fleetBuilderConfirmingBack = false;
+let previousFleetBuilderInput = 0;
+let fleetBuilderNavRepeatFrames = 0;
 const pendingGameplayTimers = new Set<number>();
 const MP_AI_IMPAIRMENT_DEFAULTS: PacketImpairmentSettings = { delayMs: 100, jitterMs: 50, dropPct: 3 };
 
@@ -253,10 +266,17 @@ const firebase = getFirebaseClient();
 const lobbyRepository = firebase ? new LobbyRepository(firebase.database) : null;
 
 const cleanupKeyboard = bindKeyboard({
-  shouldCapture: () => appPhase.name === 'fighting' || appPhase.name === 'networkFight',
+  shouldCapture: (event) =>
+    appPhase.name === 'fighting' ||
+    appPhase.name === 'networkFight' ||
+    (isFleetBuilderPhase() && event.code !== 'ShiftLeft' && event.code !== 'ShiftRight'),
 });
 window.addEventListener('beforeunload', cleanupKeyboard);
 window.addEventListener('keydown', (event) => {
+  if (handleFleetBuilderKeyboardNav(event)) {
+    return;
+  }
+
   if (event.code !== 'Escape') {
     return;
   }
@@ -273,6 +293,8 @@ window.addEventListener('keydown', (event) => {
 
 createFixedLoop(
   () => {
+    updateFleetBuilderGamepadNav();
+
     if (appPhase.name === 'fighting') {
       if (pauseMenuOpen) {
         return;
@@ -752,6 +774,24 @@ function handleMenuAction(button: HTMLButtonElement): void {
     case 'fleet-add':
       addShipToPlayerFleet(readShipId(button));
       return;
+    case 'fleet-slot-pick':
+      selectFleetBuilderSlot(readFleetSlotIndex(button));
+      return;
+    case 'fleet-pick-ship':
+      addShipToPlayerFleet(readShipId(button));
+      return;
+    case 'fleet-picker-cancel':
+      cancelFleetBuilderShipPicker();
+      return;
+    case 'fleet-back-request':
+      requestFleetBuilderBackConfirmation();
+      return;
+    case 'fleet-back-cancel':
+      cancelFleetBuilderBackConfirmation();
+      return;
+    case 'fleet-back-confirm':
+      confirmFleetBuilderBack();
+      return;
     case 'fleet-remove':
       removeShipFromPlayerFleet(readFleetUid(button));
       return;
@@ -795,8 +835,10 @@ function handleMenuAction(button: HTMLButtonElement): void {
 }
 
 function renderMenu(): void {
-  if (lastRenderedPhaseName !== null && lastRenderedPhaseName !== appPhase.name) {
+  const phaseChanged = lastRenderedPhaseName !== null && lastRenderedPhaseName !== appPhase.name;
+  if (phaseChanged) {
     closePauseMenu();
+    fleetBuilderConfirmingBack = false;
   }
   if (!isPauseMenuAvailable()) {
     closePauseMenu();
@@ -867,6 +909,10 @@ function renderMenu(): void {
       menuOverlay.innerHTML = '';
       break;
   }
+
+  if (isFleetBuilderPhase()) {
+    queueFleetBuilderFocusRestore();
+  }
 }
 
 function renderLoadingMenu(): string {
@@ -927,47 +973,563 @@ function renderBudgetMenu(title: string, action: string, detail: string, backBut
 function renderFleetBuildMenu(phase: Extract<AppPhase, { readonly name: 'fleetBuild' | 'networkFleetBuild' }>): string {
   const remaining = getRemainingBudget(phase.fleet, phase.budget);
   const isNetwork = phase.name === 'networkFleetBuild';
+  const activeSide = !isNetwork || phase.role === 'host' ? 0 : 1;
+  const modeLabel = isNetwork ? 'Multiplayer' : 'Single Player';
+  const detail = isNetwork
+    ? 'Build your fleet here. For now, Ready launches the first ship as the online starting ship.'
+    : 'Add ships to your fleet, then pick your first champion when the battle begins.';
   return `
-    <section class="menu-card menu-card-wide">
-      ${renderMenuBrand()}
-      <p class="menu-kicker">${isNetwork ? 'Multiplayer' : 'Single Player'}</p>
-      <h2>Build Your Fleet</h2>
-      <p>${remaining} / ${phase.budget} points remaining. ${isNetwork ? 'Your first ship will enter the online fight when both players are ready.' : 'Costs are placeholders for now.'}</p>
-      <div class="ship-card-grid">
-        ${SHIP_CATALOG.map((ship) => renderCatalogCard(ship.id, remaining)).join('')}
-      </div>
-      <h3>Your Fleet</h3>
-      <div class="fleet-list">
-        ${phase.fleet.length === 0 ? '<p>No ships selected yet.</p>' : phase.fleet.map(renderFleetRow).join('')}
-      </div>
-      <div class="menu-actions">
-        <button type="button" data-action="fleet-ready" ${phase.fleet.length === 0 ? 'disabled' : ''}>Ready</button>
-        <button type="button" data-action="back">${isNetwork ? 'Leave Match' : 'Back'}</button>
-      </div>
+    <section
+      class="fleet-builder-screen"
+      style="--fleet-builder-space: url('${legacyAssets.space.url}'); --fleet-builder-space-alt: url('${legacyAssets.space3.url}');"
+    >
+      <header class="fleet-builder-header">
+        <div>
+          <p class="menu-kicker">${modeLabel}</p>
+          <h2>Build Your Fleet</h2>
+          <p>${detail}</p>
+        </div>
+      </header>
+      ${renderFleetBuilderScreen({
+        fleet: phase.fleet,
+        budget: phase.budget,
+        remaining,
+        activeSide,
+        hideP2: !isNetwork,
+        readyLabel: isNetwork ? 'Ready Starting Ship' : 'Ready',
+        backLabel: isNetwork ? 'Leave Match' : 'Back',
+      })}
     </section>
   `;
 }
 
-function renderCatalogCard(shipId: ShipCatalogId, remaining: number): string {
-  const ship = getShipCatalogEntry(shipId);
-  const disabled = ship.cost > remaining ? 'disabled' : '';
+function renderFleetBuilderScreen(options: {
+  readonly fleet: readonly FleetShip[];
+  readonly budget: number;
+  readonly remaining: number;
+  readonly activeSide: 0 | 1;
+  readonly hideP2: boolean;
+  readonly readyLabel: string;
+  readonly backLabel: string;
+}): string {
+  const fleets: readonly [readonly FleetShip[], readonly FleetShip[]] =
+    options.activeSide === 0 ? [options.fleet, []] : [[], options.fleet];
+  const pickingSlotIndex =
+    fleetBuilderPickingSlotIndex !== null && fleetBuilderPickingSlotIndex === options.fleet.length && options.fleet.length < MAX_FLEET_SLOTS
+      ? fleetBuilderPickingSlotIndex
+      : null;
   return `
-    <article class="ship-card">
-      <h3>${ship.name}</h3>
-      <p>${ship.cost} pts | Crew ${ship.crew} | Battery ${ship.battery}</p>
-      <button type="button" data-action="fleet-add" data-ship-id="${ship.id}" ${disabled}>Add Ship</button>
-    </article>
+    <div class="fleet-builder-body">
+      <div class="fleet-stage" aria-label="Fleet roster">
+        ${renderFleetPanel({
+          fleet: fleets[0],
+          label: 'P1 Fleet',
+          isEditable: options.activeSide === 0,
+          isHidden: false,
+          pickerHtml: pickingSlotIndex !== null && options.activeSide === 0 ? renderFleetShipPicker(options.remaining, pickingSlotIndex) : '',
+          controlsHtml:
+            options.activeSide === 0
+              ? renderFleetCommandBlock(options.remaining, options.fleet.length, options.readyLabel, options.backLabel, pickingSlotIndex)
+              : '',
+        })}
+        ${renderFleetPanel({
+          fleet: fleets[1],
+          label: 'P2 Fleet',
+          isEditable: options.activeSide === 1,
+          isHidden: options.hideP2,
+          pickerHtml: pickingSlotIndex !== null && options.activeSide === 1 ? renderFleetShipPicker(options.remaining, pickingSlotIndex) : '',
+          controlsHtml:
+            options.activeSide === 1
+              ? renderFleetCommandBlock(options.remaining, options.fleet.length, options.readyLabel, options.backLabel, pickingSlotIndex)
+              : '',
+        })}
+      </div>
+    </div>
   `;
 }
 
-function renderFleetRow(fleetShip: FleetShip): string {
-  const ship = getShipCatalogEntry(fleetShip.catalogId);
+function renderFleetCommandBlock(
+  remaining: number,
+  fleetLength: number,
+  readyLabel: string,
+  backLabel: string,
+  pickingSlotIndex: number | null,
+): string {
   return `
-    <div class="fleet-row">
-      <span>${ship.name} | ${ship.cost} pts</span>
-      <button type="button" data-action="fleet-remove" data-fleet-uid="${fleetShip.uid}">Remove</button>
+    <aside class="fleet-command-panel" aria-label="Fleet commands">
+      <dl class="fleet-stats">
+        <div>
+          <dt>Remaining</dt>
+          <dd>${remaining}</dd>
+        </div>
+        <div>
+          <dt>Ships</dt>
+          <dd>${fleetLength}/${MAX_FLEET_SLOTS}</dd>
+        </div>
+      </dl>
+      ${renderFleetCommandActions(fleetLength, readyLabel, backLabel, pickingSlotIndex)}
+    </aside>
+  `;
+}
+
+function renderFleetCommandActions(fleetLength: number, readyLabel: string, backLabel: string, pickingSlotIndex: number | null): string {
+  if (fleetBuilderConfirmingBack) {
+    return `
+      <div class="fleet-command-actions">
+        <button type="button" data-action="fleet-back-cancel" data-fleet-nav="command" data-fleet-nav-index="1">Stay</button>
+        <button type="button" class="fleet-danger-button" data-action="fleet-back-confirm" data-fleet-nav="command" data-fleet-nav-index="2">Confirm ${backLabel}</button>
+      </div>
+    `;
+  }
+
+  const note = pickingSlotIndex === null ? '' : `<p class="fleet-command-note">Cancel returns to the fleet.</p>`;
+  return `
+    <div class="fleet-command-actions">
+      <button type="button" data-action="fleet-ready" data-fleet-nav="command" data-fleet-nav-index="0" ${fleetLength === 0 ? 'disabled' : ''}>${readyLabel}</button>
+      <button type="button" data-action="fleet-back-request" data-fleet-nav="command" data-fleet-nav-index="1">${backLabel}</button>
+    </div>
+    ${note}
+  `;
+}
+
+function renderFleetShipPicker(remaining: number, slotIndex: number): string {
+  return `
+    <section class="fleet-ship-picker" aria-label="Choose ship for slot ${slotIndex + 1}">
+      ${renderShipCatalogGrid(remaining)}
+    </section>
+  `;
+}
+
+function renderFleetPanel(options: {
+  readonly fleet: readonly FleetShip[];
+  readonly label: string;
+  readonly isEditable: boolean;
+  readonly isHidden: boolean;
+  readonly pickerHtml: string;
+  readonly controlsHtml: string;
+}): string {
+  const hiddenClass = options.isHidden ? ' fleet-console-hidden' : '';
+  const editableClass = options.isEditable ? ' fleet-console-active' : '';
+  const pickingClass = options.pickerHtml ? ' fleet-console-picking' : '';
+  const contentClass = options.controlsHtml ? ' fleet-console-content fleet-console-content-controls' : ' fleet-console-content';
+  return `
+    <section class="fleet-console${editableClass}${hiddenClass}${pickingClass}" aria-label="${options.label}" ${options.isHidden ? 'aria-hidden="true"' : ''}>
+      ${
+        options.pickerHtml
+          ? `
+            <div class="${contentClass}">
+              <div class="fleet-picker-frame">${options.pickerHtml}</div>
+              ${options.controlsHtml}
+            </div>
+          `
+          : `
+            <div class="fleet-console-title">
+              <h3>${options.label}</h3>
+            </div>
+            <div class="${contentClass}">
+              <div class="fleet-roster-frame">
+                ${renderFleetSlots(options.fleet, options.isEditable)}
+              </div>
+              ${options.controlsHtml}
+            </div>
+          `
+      }
+    </section>
+  `;
+}
+
+function renderFleetSlots(fleet: readonly FleetShip[], isEditable: boolean): string {
+  const slots = Array.from({ length: MAX_FLEET_SLOTS }, (_, index) => renderFleetSlot(index, fleet[index], isEditable, fleet.length));
+  return `<div class="fleet-slot-grid">${slots.join('')}</div>`;
+}
+
+function renderFleetSlot(index: number, fleetShip: FleetShip | undefined, isEditable: boolean, fleetLength: number): string {
+  if (!fleetShip) {
+    const isNextOpenSlot = isEditable && index === fleetLength && fleetLength < MAX_FLEET_SLOTS;
+    if (isNextOpenSlot) {
+      return `
+        <button
+          type="button"
+          class="fleet-slot fleet-slot-empty fleet-slot-open"
+          data-action="fleet-slot-pick"
+          data-fleet-slot-index="${index}"
+          data-fleet-nav="slot"
+          data-fleet-nav-index="${index}"
+          aria-label="Choose ship for empty slot ${index + 1}"
+        >
+          <span>${index + 1}</span>
+        </button>
+      `;
+    }
+
+    return `
+      <div class="fleet-slot fleet-slot-empty" aria-label="Empty fleet slot ${index + 1}">
+        <span>${index + 1}</span>
+      </div>
+    `;
+  }
+
+  const ship = getShipCatalogEntry(fleetShip.catalogId);
+  if (!isEditable) {
+    return `
+      <div class="fleet-slot fleet-slot-filled fleet-slot-readonly" aria-label="${ship.name} in slot ${index + 1}">
+        <span class="fleet-slot-number">${index + 1}</span>
+        ${renderShipThumb(fleetShip.catalogId, 'fleet-slot-ship')}
+        <span class="fleet-slot-name">${ship.name}</span>
+        <span class="fleet-slot-cost">${ship.cost}</span>
+      </div>
+    `;
+  }
+
+  return `
+    <button
+      type="button"
+      class="fleet-slot fleet-slot-filled"
+      data-action="fleet-remove"
+      data-fleet-uid="${fleetShip.uid}"
+      data-fleet-nav="slot"
+      data-fleet-nav-index="${index}"
+      aria-label="Remove ${ship.name} from slot ${index + 1}"
+    >
+      <span class="fleet-slot-number">${index + 1}</span>
+      ${renderShipThumb(fleetShip.catalogId, 'fleet-slot-ship')}
+      <span class="fleet-slot-name">${ship.name}</span>
+      <span class="fleet-slot-cost">${ship.cost}</span>
+    </button>
+  `;
+}
+
+function renderShipCatalogGrid(remaining: number): string {
+  return `
+    <div class="fleet-catalog-grid">
+      ${SHIP_CATALOG.map((ship, index) => renderCatalogCard(ship.id, remaining, index)).join('')}
     </div>
   `;
+}
+
+function renderCatalogCard(shipId: ShipCatalogId, remaining: number, catalogIndex = 0): string {
+  const ship = getShipCatalogEntry(shipId);
+  const disabled = ship.cost > remaining ? 'disabled' : '';
+  return `
+    <button
+      type="button"
+      class="fleet-picker-ship"
+      data-action="fleet-pick-ship"
+      data-ship-id="${ship.id}"
+      data-fleet-nav="picker"
+      data-fleet-nav-index="${catalogIndex}"
+      ${disabled}
+    >
+      ${renderShipThumb(ship.id, 'fleet-catalog-ship')}
+      <div>
+        <h3>${ship.name}</h3>
+        <p>${ship.cost} pts</p>
+      </div>
+    </button>
+  `;
+}
+
+function renderShipThumb(shipId: ShipCatalogId, className: string): string {
+  const ship = getShipCatalogEntry(shipId);
+  const overlay = ship.hud.shipOverlayKey
+    ? `<img class="fleet-ship-overlay" src="${legacyAssets[ship.hud.shipOverlayKey].url}" alt="" aria-hidden="true" />`
+    : '';
+  return `
+    <div class="fleet-ship-thumb ${className}" style="--fleet-ship-scale: ${ship.hud.shipScale};">
+      <img src="${legacyAssets[ship.hud.shipKey].url}" alt="${ship.name} ship" />
+      ${overlay}
+    </div>
+  `;
+}
+
+function isFleetBuilderPhase(): boolean {
+  return appPhase.name === 'fleetBuild' || appPhase.name === 'networkFleetBuild';
+}
+
+function handleFleetBuilderKeyboardNav(event: KeyboardEvent): boolean {
+  if (!isFleetBuilderPhase()) {
+    return false;
+  }
+
+  const direction = readFleetBuilderKeyboardDirection(event.code);
+  if (direction) {
+    event.preventDefault();
+    focusFleetBuilderNav(direction);
+    return true;
+  }
+
+  if (event.code === 'Space' || event.code === 'Enter' || event.code === 'NumpadEnter') {
+    event.preventDefault();
+    activateFleetBuilderFocusedControl();
+    return true;
+  }
+
+  if (event.code === 'KeyE' || event.code === 'KeyO' || event.code === 'Escape') {
+    event.preventDefault();
+    activateFleetBuilderBackControl();
+    return true;
+  }
+
+  return false;
+}
+
+function updateFleetBuilderGamepadNav(): void {
+  if (!isFleetBuilderPhase()) {
+    previousFleetBuilderInput = 0;
+    fleetBuilderNavRepeatFrames = 0;
+    return;
+  }
+
+  const input = readGamepadMenuInput(0);
+  const pressed = input & ~previousFleetBuilderInput;
+  if (fleetBuilderNavRepeatFrames > 0) {
+    fleetBuilderNavRepeatFrames -= 1;
+  }
+
+  const direction = readFleetBuilderInputDirection(pressed) ?? (fleetBuilderNavRepeatFrames === 0 ? readFleetBuilderInputDirection(input) : null);
+  if (direction) {
+    focusFleetBuilderNav(direction);
+    fleetBuilderNavRepeatFrames = FLEET_NAV_REPEAT_FRAMES;
+  } else if (input === 0) {
+    fleetBuilderNavRepeatFrames = 0;
+  }
+
+  if ((pressed & MenuInputBits.Primary) !== 0) {
+    activateFleetBuilderFocusedControl();
+  } else if ((pressed & MenuInputBits.Secondary) !== 0) {
+    activateFleetBuilderBackControl();
+  }
+
+  previousFleetBuilderInput = input;
+}
+
+function readFleetBuilderKeyboardDirection(code: string): FleetBuilderNavDirection | null {
+  switch (code) {
+    case 'ArrowUp':
+    case 'KeyW':
+      return 'up';
+    case 'ArrowDown':
+    case 'KeyS':
+      return 'down';
+    case 'ArrowLeft':
+    case 'KeyA':
+      return 'left';
+    case 'ArrowRight':
+    case 'KeyD':
+      return 'right';
+    default:
+      return null;
+  }
+}
+
+function readFleetBuilderInputDirection(input: number): FleetBuilderNavDirection | null {
+  if ((input & MenuInputBits.Up) !== 0) {
+    return 'up';
+  }
+  if ((input & MenuInputBits.Down) !== 0) {
+    return 'down';
+  }
+  if ((input & MenuInputBits.Left) !== 0) {
+    return 'left';
+  }
+  if ((input & MenuInputBits.Right) !== 0) {
+    return 'right';
+  }
+
+  return null;
+}
+
+function queueFleetBuilderFocusRestore(): void {
+  window.setTimeout(() => {
+    if (isFleetBuilderPhase()) {
+      restoreFleetBuilderFocus();
+    }
+  }, 0);
+}
+
+function restoreFleetBuilderFocus(): HTMLButtonElement | null {
+  const activeButton = getActiveFleetBuilderButton();
+  if (activeButton) {
+    rememberFleetBuilderNavTarget(activeButton);
+    return activeButton;
+  }
+
+  const buttons = getFleetBuilderNavButtons();
+  const previousTarget = fleetBuilderNavTarget;
+  const targetButton =
+    (previousTarget
+      ? buttons.find((button) => button.dataset.fleetNav === previousTarget.nav && Number(button.dataset.fleetNavIndex) === previousTarget.index)
+      : null) ??
+    buttons.find((button) => button.dataset.fleetNav === 'picker') ??
+    buttons.find((button) => button.dataset.fleetNav === 'slot') ??
+    buttons[0] ??
+    null;
+
+  targetButton?.focus();
+  if (targetButton) {
+    rememberFleetBuilderNavTarget(targetButton);
+  }
+  return targetButton;
+}
+
+function focusFleetBuilderNav(direction: FleetBuilderNavDirection): void {
+  const buttons = getFleetBuilderNavButtons();
+  const current = getActiveFleetBuilderButton() ?? restoreFleetBuilderFocus();
+  if (!current) {
+    return;
+  }
+
+  const currentRect = current.getBoundingClientRect();
+  const currentCenter = getRectCenter(currentRect);
+  let bestButton: HTMLButtonElement | null = null;
+  let bestScore = Number.POSITIVE_INFINITY;
+
+  for (const candidate of buttons) {
+    if (candidate === current) {
+      continue;
+    }
+
+    const candidateRect = candidate.getBoundingClientRect();
+    const candidateCenter = getRectCenter(candidateRect);
+    const dx = candidateCenter.x - currentCenter.x;
+    const dy = candidateCenter.y - currentCenter.y;
+    const primaryDistance = direction === 'left' || direction === 'right' ? Math.abs(dx) : Math.abs(dy);
+    const secondaryDistance = direction === 'left' || direction === 'right' ? Math.abs(dy) : Math.abs(dx);
+
+    if (!isCandidateInDirection(direction, dx, dy)) {
+      continue;
+    }
+
+    const score = primaryDistance * 1.4 + secondaryDistance;
+    if (score < bestScore) {
+      bestScore = score;
+      bestButton = candidate;
+    }
+  }
+
+  if (bestButton) {
+    bestButton.focus();
+    rememberFleetBuilderNavTarget(bestButton);
+  }
+}
+
+function activateFleetBuilderFocusedControl(): void {
+  const button = getActiveFleetBuilderButton() ?? restoreFleetBuilderFocus();
+  button?.click();
+}
+
+function activateFleetBuilderBackControl(): void {
+  if (fleetBuilderPickingSlotIndex !== null) {
+    cancelFleetBuilderShipPicker();
+    return;
+  }
+
+  if (fleetBuilderConfirmingBack) {
+    cancelFleetBuilderBackConfirmation();
+    return;
+  }
+
+  const backButton = menuOverlay.querySelector<HTMLButtonElement>('button[data-action="fleet-back-request"]');
+  backButton?.click();
+}
+
+function getActiveFleetBuilderButton(): HTMLButtonElement | null {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLButtonElement) || !menuOverlay.contains(active) || !active.dataset.fleetNav || active.disabled) {
+    return null;
+  }
+
+  return active;
+}
+
+function getFleetBuilderNavButtons(): HTMLButtonElement[] {
+  return Array.from(menuOverlay.querySelectorAll<HTMLButtonElement>('button[data-fleet-nav]')).filter((button) => !button.disabled);
+}
+
+function rememberFleetBuilderNavTarget(button: HTMLButtonElement): void {
+  const index = Number(button.dataset.fleetNavIndex);
+  fleetBuilderNavTarget = {
+    nav: button.dataset.fleetNav ?? 'catalog',
+    index: Number.isFinite(index) ? index : 0,
+  };
+}
+
+function getRectCenter(rect: DOMRect): { readonly x: number; readonly y: number } {
+  return {
+    x: rect.left + rect.width / 2,
+    y: rect.top + rect.height / 2,
+  };
+}
+
+function isCandidateInDirection(direction: FleetBuilderNavDirection, dx: number, dy: number): boolean {
+  const threshold = 4;
+  switch (direction) {
+    case 'up':
+      return dy < -threshold;
+    case 'down':
+      return dy > threshold;
+    case 'left':
+      return dx < -threshold;
+    case 'right':
+      return dx > threshold;
+  }
+}
+
+function selectFleetBuilderSlot(slotIndex: number): void {
+  if (appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') {
+    return;
+  }
+
+  if (slotIndex !== appPhase.fleet.length || appPhase.fleet.length >= MAX_FLEET_SLOTS) {
+    return;
+  }
+
+  fleetBuilderPickingSlotIndex = slotIndex;
+  fleetBuilderConfirmingBack = false;
+  fleetBuilderNavTarget = { nav: 'picker', index: 0 };
+  renderMenu();
+}
+
+function cancelFleetBuilderShipPicker(): void {
+  if (appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') {
+    return;
+  }
+
+  const slotIndex = fleetBuilderPickingSlotIndex ?? appPhase.fleet.length;
+  fleetBuilderPickingSlotIndex = null;
+  fleetBuilderConfirmingBack = false;
+  fleetBuilderNavTarget = { nav: 'slot', index: Math.min(slotIndex, MAX_FLEET_SLOTS - 1) };
+  renderMenu();
+}
+
+function requestFleetBuilderBackConfirmation(): void {
+  if (appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') {
+    return;
+  }
+
+  fleetBuilderPickingSlotIndex = null;
+  fleetBuilderConfirmingBack = true;
+  fleetBuilderNavTarget = { nav: 'command', index: 1 };
+  renderMenu();
+}
+
+function cancelFleetBuilderBackConfirmation(): void {
+  if (appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') {
+    return;
+  }
+
+  fleetBuilderConfirmingBack = false;
+  fleetBuilderNavTarget = { nav: 'command', index: 1 };
+  renderMenu();
+}
+
+function confirmFleetBuilderBack(): void {
+  if (appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') {
+    return;
+  }
+
+  fleetBuilderConfirmingBack = false;
+  goBack();
 }
 
 function renderShipSelectMenu(phase: Extract<AppPhase, { readonly name: 'shipSelect' }>): string {
@@ -1147,6 +1709,10 @@ function addShipToPlayerFleet(shipId: ShipCatalogId): void {
     return;
   }
 
+  if (appPhase.fleet.length >= MAX_FLEET_SLOTS) {
+    return;
+  }
+
   const ship = getShipCatalogEntry(shipId);
   if (ship.cost > getRemainingBudget(appPhase.fleet, appPhase.budget)) {
     return;
@@ -1157,6 +1723,9 @@ function addShipToPlayerFleet(shipId: ShipCatalogId): void {
     ...appPhase,
     fleet: [...appPhase.fleet, { uid: `player-${fleetSerial}`, catalogId: shipId, alive: true }],
   };
+  fleetBuilderPickingSlotIndex = null;
+  fleetBuilderConfirmingBack = false;
+  fleetBuilderNavTarget = { nav: 'slot', index: Math.min(appPhase.fleet.length, MAX_FLEET_SLOTS - 1) };
   renderMenu();
 }
 
@@ -1169,6 +1738,8 @@ function removeShipFromPlayerFleet(uid: string): void {
     ...appPhase,
     fleet: appPhase.fleet.filter((ship) => ship.uid !== uid),
   };
+  fleetBuilderPickingSlotIndex = null;
+  fleetBuilderConfirmingBack = false;
   renderMenu();
 }
 
@@ -2568,6 +3139,15 @@ function readFleetUid(button: HTMLButtonElement): string {
   }
 
   return uid;
+}
+
+function readFleetSlotIndex(button: HTMLButtonElement): number {
+  const index = Number(button.dataset.fleetSlotIndex);
+  if (!Number.isInteger(index) || index < 0 || index >= MAX_FLEET_SLOTS) {
+    throw new Error(`Invalid fleet slot index: ${button.dataset.fleetSlotIndex}`);
+  }
+
+  return index;
 }
 
 function readLobbyId(button: HTMLButtonElement): string {

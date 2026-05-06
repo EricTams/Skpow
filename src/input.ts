@@ -60,6 +60,15 @@ export interface GamepadButtonStatus {
   readonly value: number;
 }
 
+export enum MenuInputBits {
+  Up = 1 << 0,
+  Down = 1 << 1,
+  Left = 1 << 2,
+  Right = 1 << 3,
+  Primary = 1 << 4,
+  Secondary = 1 << 5,
+}
+
 export function bindKeyboard(options: { readonly shouldCapture?: (event: KeyboardEvent) => boolean } = {}): () => void {
   const onKeyDown = (event: KeyboardEvent) => {
     if (isGameKey(event.code) && shouldCaptureKeyboard(event, options.shouldCapture)) {
@@ -106,6 +115,38 @@ export function readInputDeviceStatus(): InputDeviceStatus {
 export function readGamepadInput(index: number): number {
   const gamepad = readGamepads()[index];
   return gamepad ? readGamepadBits(gamepad) : 0;
+}
+
+export function readGamepadMenuInput(index: number): number {
+  const gamepad = readGamepads()[index];
+  if (!gamepad) {
+    return 0;
+  }
+
+  let input = 0;
+  const xAxis = gamepad.axes[0] ?? 0;
+  const yAxis = gamepad.axes[1] ?? 0;
+
+  if (yAxis < -GAMEPAD_AXIS_THRESHOLD || gamepad.buttons[12]?.pressed) {
+    input |= MenuInputBits.Up;
+  }
+  if (yAxis > GAMEPAD_AXIS_THRESHOLD || gamepad.buttons[13]?.pressed) {
+    input |= MenuInputBits.Down;
+  }
+  if (xAxis < -GAMEPAD_AXIS_THRESHOLD || gamepad.buttons[14]?.pressed) {
+    input |= MenuInputBits.Left;
+  }
+  if (xAxis > GAMEPAD_AXIS_THRESHOLD || gamepad.buttons[15]?.pressed) {
+    input |= MenuInputBits.Right;
+  }
+  if (gamepad.buttons[0]?.pressed || gamepad.buttons[5]?.pressed) {
+    input |= MenuInputBits.Primary;
+  }
+  if (gamepad.buttons[1]?.pressed || gamepad.buttons[4]?.pressed) {
+    input |= MenuInputBits.Secondary;
+  }
+
+  return input;
 }
 
 export function readGamepadBits(gamepad: Pick<Gamepad, 'axes' | 'buttons'>): number {
