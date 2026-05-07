@@ -28,6 +28,7 @@ import {
 const TOP_SPEED_ALLOWANCE = fixedFromInt(2);
 const CLOSE_PLANET_SPEED_BOOST = fixedFromInt(2000);
 const GRAVITY_STRENGTH = fixedFromInt(1000);
+const MIN_GRAVITY_DIVISOR = 1;
 const MIN_GRAVITY_DISTANCE = fixedFromInt(50);
 const THRUST_CAP_MIN = fixed(0.06);
 const THRUST_CAP_RANGE = fixed(0.94);
@@ -781,7 +782,9 @@ function applyPlanetGravity(
 
   const distanceSquared = Math.max(rawDistanceSquared, fixedSquared(MIN_GRAVITY_DISTANCE)) as Fixed;
   const distance = fixedSqrt(distanceSquared);
-  const gravityMagnitude = fixedDiv(GRAVITY_STRENGTH, distanceSquared);
+  const gravityDivisor = Math.max(MIN_GRAVITY_DIVISOR, state.gameplay.gravityDivisor);
+  const gravityStrength = fixedDiv(GRAVITY_STRENGTH, fixedFromInt(gravityDivisor));
+  const gravityMagnitude = fixedDiv(gravityStrength, distanceSquared);
   const gravityX = fixedMul(fixedDiv(relativeX, distance), fixedMul(gravityMagnitude, fixed(-1)));
   const gravityY = fixedMul(fixedDiv(relativeY, distance), fixedMul(gravityMagnitude, fixed(-1)));
   const nextVx = fixedAdd(vx, gravityX);

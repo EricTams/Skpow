@@ -42,7 +42,35 @@ button:disabled {
   opacity: 0.5;
 }
 
+.audio-toggle-button {
+  border-color: rgba(248, 216, 120, 0.65);
+  background: rgba(248, 216, 120, 0.14);
+  color: #f8d878;
+}
+
+.audio-toggle-button:hover,
+.audio-toggle-button:focus-visible {
+  background: rgba(248, 216, 120, 0.24);
+}
+
+.low-gravity-toggle-button {
+  border-color: rgba(121, 192, 255, 0.68);
+  background: rgba(121, 192, 255, 0.14);
+  color: #79c0ff;
+}
+
+.low-gravity-toggle-button:hover,
+.low-gravity-toggle-button:focus-visible {
+  background: rgba(121, 192, 255, 0.24);
+}
+
 button[data-fleet-nav]:focus-visible {
+  outline: 2px solid #f8d878;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(248, 216, 120, 0.18);
+}
+
+button[data-ship-select-nav]:focus-visible {
   outline: 2px solid #f8d878;
   outline-offset: 2px;
   box-shadow: 0 0 0 4px rgba(248, 216, 120, 0.18);
@@ -487,6 +515,19 @@ button[data-fleet-nav]:focus-visible {
   gap: 0.45rem;
 }
 
+.fleet-stage-hotseat {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+.fleet-stage-hotseat .fleet-console-content-controls {
+  grid-template-columns: 1fr;
+}
+
+.fleet-stage-hotseat .fleet-console {
+  --fleet-roster-height: calc((4rem * 2) + 0.25rem);
+}
+
 .fleet-console,
 .fleet-catalog {
   border: 1px solid rgba(121, 192, 255, 0.24);
@@ -726,6 +767,152 @@ button.fleet-slot {
   margin: 0;
   color: #c9d1d9;
   font-size: 0.74rem;
+}
+
+.hotseat-ship-select {
+  width: min(100%, 78rem);
+  height: min(100%, 43rem);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0.8rem;
+  overflow: hidden;
+  border: 1px solid rgba(121, 192, 255, 0.26);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(31, 111, 235, 0.18), transparent 44%),
+    rgba(2, 4, 13, 0.62);
+  padding: 1rem;
+}
+
+.hotseat-select-header {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  align-items: end;
+  gap: 1.25rem;
+}
+
+.hotseat-select-header h2,
+.hotseat-select-header p {
+  margin: 0;
+}
+
+.hotseat-select-header h2 {
+  color: #f0f6fc;
+  font-size: clamp(2rem, 5vw, 4.25rem);
+  line-height: 0.95;
+}
+
+.hotseat-select-header > p {
+  color: #c9d1d9;
+  font-size: clamp(0.95rem, 1.8vw, 1.25rem);
+}
+
+.hotseat-select-grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+.hotseat-select-panel {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  border: 1px solid rgba(121, 192, 255, 0.24);
+  border-radius: 14px;
+  background: rgba(2, 4, 13, 0.48);
+  padding: 1rem;
+}
+
+.hotseat-select-panel-locked {
+  border-color: rgba(248, 216, 120, 0.42);
+}
+
+.hotseat-select-panel > h3 {
+  margin-bottom: 0.25rem;
+  color: #f8d878;
+  font-size: clamp(1.4rem, 3vw, 2.3rem);
+  line-height: 1;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.hotseat-select-status {
+  margin: 0;
+  color: #c9d1d9;
+  font-size: 0.84rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ship-select-roster-frame {
+  min-height: 0;
+  height: 100%;
+  margin-top: 0.85rem;
+}
+
+.ship-select-slot-grid {
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+.ship-select-slot {
+  min-height: 0;
+}
+
+.ship-select-slot-empty {
+  min-height: 0;
+}
+
+.ship-select-slot-defeated {
+  border-color: rgba(248, 81, 73, 0.62);
+  filter: grayscale(0.75) brightness(0.58);
+}
+
+.ship-select-slot-defeated::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  background: rgba(2, 4, 13, 0.32);
+}
+
+.ship-select-slot-selected {
+  border-color: rgba(248, 216, 120, 0.92);
+  box-shadow: inset 0 0 22px rgba(248, 216, 120, 0.2);
+}
+
+.ship-select-selected-mark {
+  position: absolute;
+  right: 0.3rem;
+  bottom: 0.3rem;
+  z-index: 3;
+  border: 1px solid rgba(248, 216, 120, 0.86);
+  background: rgba(2, 4, 13, 0.82);
+  color: #f8d878;
+  font-size: 0.58rem;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  padding: 0.12rem 0.22rem;
+  text-transform: uppercase;
+}
+
+.ship-select-defeated-mark {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  color: rgba(248, 81, 73, 0.92);
+  font-size: clamp(3.4rem, 9vw, 6.2rem);
+  font-weight: 900;
+  line-height: 1;
+  text-shadow:
+    0 0 8px rgba(2, 4, 13, 0.9),
+    0 0 18px rgba(248, 81, 73, 0.48);
+  transform: scaleX(1.15);
 }
 
 .fleet-ship-picker {
@@ -1120,8 +1307,33 @@ button.fleet-slot {
     grid-template-columns: 1fr;
   }
 
+  .fleet-stage-hotseat,
+  .hotseat-select-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .hotseat-ship-select {
+    height: auto;
+    min-height: 100%;
+    overflow: auto;
+  }
+
+  .hotseat-select-header {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .hotseat-select-panel {
+    min-height: 17rem;
+  }
+
   .fleet-slot-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .ship-select-slot-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-auto-rows: minmax(5rem, 1fr);
   }
 
   .developer-panel {

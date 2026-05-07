@@ -1,5 +1,7 @@
 import './style.css';
 
+import { GameAudio } from './audio';
+import { shipSfx } from './audioAssets';
 import { MenuInputBits, bindKeyboard, readGamepadMenuInput, readInputDeviceStatus, readLocalInputs, readPrimaryLocalInput } from './input';
 import { createFixedLoop, SIM_FPS } from './loop';
 import { getFirebaseClient, isFirebaseConfigured, observeAnonymousUser, signInWithAnonymousAuth } from './net/firebase';
@@ -17,7 +19,7 @@ import { hashState } from './sim/hash';
 import { createInitialState } from './sim/state';
 import { isKronBeamHitting, stepGame } from './sim/step';
 import { ANGLE_STEPS, type Angle } from './sim/trig';
-import type { ActorState, GameState, ProjectileState, ShipState } from './sim/types';
+import type { ActorState, GameState, GameplaySettings, ProjectileState, ShipState } from './sim/types';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) {
@@ -31,6 +33,7 @@ const LAGGY_MP_BUDGET = 100;
 const LAGGY_MP_FIND_TIMEOUT_MS = 1500;
 const MAX_FLEET_SLOTS = 14;
 const FLEET_NAV_REPEAT_FRAMES = 10;
+const LOW_GRAVITY_DIVISOR = 6;
 
 interface FleetShip {
   readonly uid: string;
@@ -39,6 +42,7 @@ interface FleetShip {
 }
 
 interface BattleSession {
+  readonly mode: 'single' | 'hotseat';
   readonly budget: number;
   readonly fleets: readonly [readonly FleetShip[], readonly FleetShip[]];
   readonly selectedShipUids: readonly [string | null, string | null];
@@ -68,9 +72,23 @@ type AppPhase =
   | { readonly name: 'loading' }
   | { readonly name: 'mainMenu' }
   | { readonly name: 'singleBudget' }
+  | { readonly name: 'hotseatBudget' }
   | { readonly name: 'fleetBuild'; readonly budget: number; readonly fleet: readonly FleetShip[] }
+  | {
+      readonly name: 'hotseatFleetBuild';
+      readonly budget: number;
+      readonly fleets: readonly [readonly FleetShip[], readonly FleetShip[]];
+      readonly ready: readonly [boolean, boolean];
+    }
   | { readonly name: 'shipSelect'; readonly session: BattleSession; readonly message?: string }
+  | {
+      readonly name: 'hotseatShipSelect';
+      readonly session: BattleSession;
+      readonly selectingSideIds: readonly (0 | 1)[];
+      readonly message?: string;
+    }
   | { readonly name: 'fighting'; readonly session: BattleSession; readonly handledWinnerId: number | null }
+  | { readonly name: 'hotseatFighting'; readonly session: BattleSession; readonly handledWinnerId: number | null }
   | { readonly name: 'aiDemo'; readonly round: number }
   | { readonly name: 'roundResult'; readonly session: BattleSession; readonly winnerId: number; readonly loserId: number }
   | { readonly name: 'finalResult'; readonly title: string; readonly detail: string }
@@ -84,6 +102,7 @@ type AppPhase =
 
 type MatchLoadout = readonly [ShipCatalogId, ShipCatalogId];
 type FleetBuilderNavDirection = 'up' | 'down' | 'left' | 'right';
+type PlayerSide = 0 | 1;
 
 interface FleetBuilderNavTarget {
   readonly nav: string;
@@ -115,14 +134,18 @@ let networkDebugSettings: NetworkDebugSettings = {
   aiJoiner: false,
 };
 let presentationCorrection: PresentationCorrection | null = null;
+let lowGravityEnabled = true;
 let suppressPeerDisconnectPopup = false;
 let pauseMenuOpen = false;
 let lastRenderedPhaseName: AppPhase['name'] | null = null;
-let fleetBuilderNavTarget: FleetBuilderNavTarget | null = null;
-let fleetBuilderPickingSlotIndex: number | null = null;
-let fleetBuilderConfirmingBack = false;
-let previousFleetBuilderInput = 0;
-let fleetBuilderNavRepeatFrames = 0;
+let fleetBuilderNavTargets: [FleetBuilderNavTarget | null, FleetBuilderNavTarget | null] = [null, null];
+let fleetBuilderPickingSlotIndices: [number | null, number | null] = [null, null];
+let fleetBuilderConfirmingBack: [boolean, boolean] = [false, false];
+let previousFleetBuilderInputs: [number, number] = [0, 0];
+let fleetBuilderNavRepeatFrames: [number, number] = [0, 0];
+let shipSelectNavTargets: [FleetBuilderNavTarget | null, FleetBuilderNavTarget | null] = [null, null];
+let previousShipSelectInputs: [number, number] = [0, 0];
+let shipSelectNavRepeatFrames: [number, number] = [0, 0];
 const pendingGameplayTimers = new Set<number>();
 const MP_AI_IMPAIRMENT_DEFAULTS: PacketImpairmentSettings = { delayMs: 100, jitterMs: 50, dropPct: 3 };
 
@@ -144,6 +167,7 @@ app.innerHTML = `
           <div class="pause-card">
             <h2 id="pause-title">Menu</h2>
             <div class="menu-actions">
+              <button class="audio-toggle-button" type="button" data-pause-audio>Unmute Audio</button>
               <button type="button" data-pause-resume>Resume</button>
               <button type="button" data-pause-quit>Quit to Main Menu</button>
             </div>
@@ -228,6 +252,7 @@ const popupTitle = requiredElement<HTMLElement>('[data-popup-title]');
 const popupMessage = requiredElement<HTMLElement>('[data-popup-message]');
 const popupDismissButton = requiredElement<HTMLButtonElement>('[data-popup-dismiss]');
 const pauseOverlay = requiredElement<HTMLElement>('[data-pause-overlay]');
+const pauseAudioButton = requiredElement<HTMLButtonElement>('[data-pause-audio]');
 const pauseResumeButton = requiredElement<HTMLButtonElement>('[data-pause-resume]');
 const pauseQuitButton = requiredElement<HTMLButtonElement>('[data-pause-quit]');
 const gameStatus = requiredElement<HTMLElement>('[data-game-status]');
@@ -247,6 +272,7 @@ const laggyMpHostButton = requiredElement<HTMLButtonElement>('[data-laggy-mp-hos
 const laggyMpClientButton = requiredElement<HTMLButtonElement>('[data-laggy-mp-client]');
 const fakeLagInputs = Array.from(document.querySelectorAll<HTMLInputElement>('[data-fake-lag-field]'));
 const hudContainers = Array.from(document.querySelectorAll<HTMLElement>('[data-player-hud]'));
+const gameAudio = new GameAudio();
 
 const legacyImages = new LegacyImageStore({
   onProgress: (progress) => {
@@ -259,6 +285,7 @@ const legacyImages = new LegacyImageStore({
 });
 const renderer = new CanvasRenderer(canvas, legacyImages);
 renderer.setShipLoadout(currentLoadout);
+gameAudio.subscribe(syncAudioControls);
 renderHud(currentLoadout);
 renderMenu();
 
@@ -268,12 +295,21 @@ const lobbyRepository = firebase ? new LobbyRepository(firebase.database) : null
 const cleanupKeyboard = bindKeyboard({
   shouldCapture: (event) =>
     appPhase.name === 'fighting' ||
+    appPhase.name === 'hotseatFighting' ||
     appPhase.name === 'networkFight' ||
     (isFleetBuilderPhase() && event.code !== 'ShiftLeft' && event.code !== 'ShiftRight'),
 });
 window.addEventListener('beforeunload', cleanupKeyboard);
 window.addEventListener('keydown', (event) => {
   if (handleFleetBuilderKeyboardNav(event)) {
+    return;
+  }
+
+  if (handleShipSelectKeyboardNav(event)) {
+    return;
+  }
+
+  if (handleDebugShipKillShortcut(event)) {
     return;
   }
 
@@ -291,9 +327,25 @@ window.addEventListener('keydown', (event) => {
   }
 });
 
+function handleDebugShipKillShortcut(event: KeyboardEvent): boolean {
+  if (!event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) {
+    return false;
+  }
+
+  const sideId = event.code === 'Digit1' || event.code === 'Numpad1' ? 0 : event.code === 'Digit2' || event.code === 'Numpad2' ? 1 : null;
+  if (sideId === null) {
+    return false;
+  }
+
+  event.preventDefault();
+  debugKillShip(sideId);
+  return true;
+}
+
 createFixedLoop(
   () => {
     updateFleetBuilderGamepadNav();
+    updateShipSelectGamepadNav();
 
     if (appPhase.name === 'fighting') {
       if (pauseMenuOpen) {
@@ -301,6 +353,24 @@ createFixedLoop(
       }
       const localInputs = readLocalInputs();
       state = stepGame(state, [localInputs[0], getAiInput(state, 1)]);
+      trackDamage(state);
+      if (hasActiveShipExplosion(state)) {
+        return;
+      }
+      const outcome = getMatchOutcome(state);
+      if (outcome.kind === 'winner' && appPhase.handledWinnerId !== outcome.winnerId) {
+        resolveLocalRound(appPhase.session, outcome.winnerId);
+      } else if (outcome.kind === 'draw' && appPhase.handledWinnerId === null) {
+        resolveLocalMutualDestruction(appPhase.session);
+      }
+      return;
+    }
+
+    if (appPhase.name === 'hotseatFighting') {
+      if (pauseMenuOpen) {
+        return;
+      }
+      state = stepGame(state, readLocalInputs());
       trackDamage(state);
       if (hasActiveShipExplosion(state)) {
         return;
@@ -389,6 +459,10 @@ function getAiDebugModes(renderState: GameState): readonly (AiMovementMode | nul
 
   if (appPhase.name === 'fighting') {
     return renderState.ships.map((ship) => (ship.id === 1 ? getAiMovementMode(renderState, ship.id) : null));
+  }
+
+  if (appPhase.name === 'hotseatFighting') {
+    return renderState.ships.map(() => null);
   }
 
   if (appPhase.name === 'networkFight') {
@@ -613,10 +687,17 @@ function startNextNetworkAiRound(): void {
   currentLoadout = chooseRandomNetworkAiLoadout();
   const seed = Date.now() >>> 0;
   clearPendingGameplayPackets();
-  state = createInitialState(seed, currentLoadout);
+  state = createInitialState(seed, currentLoadout, getGameplaySettings());
   renderer.setShipLoadout(currentLoadout);
   renderHud(currentLoadout);
-  networkMatch = new NetworkMatchSession('host', { roundId: networkAiRound, seed, loadout: currentLoadout, aiDemo: true, readyImmediately: true });
+  networkMatch = new NetworkMatchSession('host', {
+    roundId: networkAiRound,
+    seed,
+    loadout: currentLoadout,
+    gameplay: getGameplaySettings(),
+    aiDemo: true,
+    readyImmediately: true,
+  });
   networkMatchStatus = networkMatch.status;
   presentationCorrection = null;
   sendGameplayPackets(networkMatch.takeOutgoingPackets());
@@ -697,6 +778,10 @@ pauseResumeButton.addEventListener('click', () => {
   closePauseMenu();
 });
 
+pauseAudioButton.addEventListener('click', () => {
+  gameAudio.toggleMuted();
+});
+
 pauseQuitButton.addEventListener('click', () => {
   quitToMainMenu();
 });
@@ -753,8 +838,18 @@ for (const input of fakeLagInputs) {
 function handleMenuAction(button: HTMLButtonElement): void {
   const action = button.dataset.action;
   switch (action) {
+    case 'toggle-audio':
+      gameAudio.toggleMuted();
+      return;
+    case 'toggle-low-gravity':
+      lowGravityEnabled = !lowGravityEnabled;
+      renderMenu();
+      return;
     case 'main-single':
       appPhase = { name: 'singleBudget' };
+      break;
+    case 'main-hotseat':
+      appPhase = { name: 'hotseatBudget' };
       break;
     case 'main-ai-demo':
       startAiDemoRound(1);
@@ -771,39 +866,44 @@ function handleMenuAction(button: HTMLButtonElement): void {
     case 'choose-budget':
       appPhase = { name: 'fleetBuild', budget: readBudget(button), fleet: [] };
       break;
+    case 'choose-hotseat-budget':
+      appPhase = { name: 'hotseatFleetBuild', budget: readBudget(button), fleets: [[], []], ready: [false, false] };
+      break;
     case 'fleet-add':
       addShipToPlayerFleet(readShipId(button));
       return;
     case 'fleet-slot-pick':
-      selectFleetBuilderSlot(readFleetSlotIndex(button));
+      selectFleetBuilderSlot(readFleetSlotIndex(button), readFleetSide(button));
       return;
     case 'fleet-pick-ship':
-      addShipToPlayerFleet(readShipId(button));
+      addShipToPlayerFleet(readShipId(button), readFleetSide(button));
       return;
     case 'fleet-picker-cancel':
-      cancelFleetBuilderShipPicker();
+      cancelFleetBuilderShipPicker(readFleetSide(button));
       return;
     case 'fleet-back-request':
-      requestFleetBuilderBackConfirmation();
+      requestFleetBuilderBackConfirmation(readFleetSide(button));
       return;
     case 'fleet-back-cancel':
-      cancelFleetBuilderBackConfirmation();
+      cancelFleetBuilderBackConfirmation(readFleetSide(button));
       return;
     case 'fleet-back-confirm':
       confirmFleetBuilderBack();
       return;
     case 'fleet-remove':
-      removeShipFromPlayerFleet(readFleetUid(button));
+      removeShipFromPlayerFleet(readFleetUid(button), readFleetSide(button));
       return;
     case 'fleet-ready':
       if (appPhase.name === 'networkFleetBuild') {
         readyNetworkFleet();
+      } else if (appPhase.name === 'hotseatFleetBuild') {
+        toggleHotseatFleetReady(readFleetSide(button));
       } else {
         startSinglePlayerRun();
       }
       return;
     case 'ship-pick':
-      choosePlayerShip(readFleetUid(button));
+      choosePlayerShip(readFleetUid(button), readFleetSide(button));
       return;
     case 'round-continue':
       continueAfterRound();
@@ -838,7 +938,7 @@ function renderMenu(): void {
   const phaseChanged = lastRenderedPhaseName !== null && lastRenderedPhaseName !== appPhase.name;
   if (phaseChanged) {
     closePauseMenu();
-    fleetBuilderConfirmingBack = false;
+    fleetBuilderConfirmingBack = [false, false];
   }
   if (!isPauseMenuAvailable()) {
     closePauseMenu();
@@ -846,6 +946,7 @@ function renderMenu(): void {
   lastRenderedPhaseName = appPhase.name;
 
   const combatPhase = isCombatPhase();
+  syncCombatMusic(combatPhase);
   legacyScreen.classList.toggle('legacy-screen-menu-active', !combatPhase);
   arenaFrame.classList.toggle('arena-frame-menu-active', !combatPhase);
   menuOverlay.classList.toggle('menu-overlay-hidden', combatPhase);
@@ -868,11 +969,25 @@ function renderMenu(): void {
         '<button type="button" data-action="back">Back</button>',
       );
       break;
+    case 'hotseatBudget':
+      menuOverlay.innerHTML = renderBudgetMenu(
+        'Build Hotseat Fleets',
+        'choose-hotseat-budget',
+        'Pick a shared point budget for both local players.',
+        '<button type="button" data-action="back">Back</button>',
+      );
+      break;
     case 'fleetBuild':
       menuOverlay.innerHTML = renderFleetBuildMenu(appPhase);
       break;
+    case 'hotseatFleetBuild':
+      menuOverlay.innerHTML = renderHotseatFleetBuildMenu(appPhase);
+      break;
     case 'shipSelect':
       menuOverlay.innerHTML = renderShipSelectMenu(appPhase);
+      break;
+    case 'hotseatShipSelect':
+      menuOverlay.innerHTML = renderHotseatShipSelectMenu(appPhase);
       break;
     case 'roundResult':
       menuOverlay.innerHTML = renderRoundResultMenu(appPhase);
@@ -904,6 +1019,7 @@ function renderMenu(): void {
       menuOverlay.innerHTML = renderFinalResultMenu(`Player ${appPhase.winnerId + 1} wins`, 'The online duel is complete.');
       break;
     case 'fighting':
+    case 'hotseatFighting':
     case 'aiDemo':
     case 'networkFight':
       menuOverlay.innerHTML = '';
@@ -913,6 +1029,10 @@ function renderMenu(): void {
   if (isFleetBuilderPhase()) {
     queueFleetBuilderFocusRestore();
   }
+  if (isShipSelectPhase()) {
+    queueShipSelectFocusRestore();
+  }
+  syncAudioControls();
 }
 
 function renderLoadingMenu(): string {
@@ -941,11 +1061,24 @@ function renderMainMenu(): string {
       <p>Build a fleet, pick your next ship, and fight until one side is out of ships.</p>
       <div class="menu-actions">
         <button type="button" data-action="main-single">Single Player</button>
+        <button type="button" data-action="main-hotseat">Hotseat</button>
         <button type="button" data-action="main-ai-demo">Attract Mode</button>
         <button type="button" data-action="main-multi">Multiplayer</button>
+        <button class="low-gravity-toggle-button" type="button" data-action="toggle-low-gravity" aria-pressed="${lowGravityEnabled}">${getLowGravityToggleLabel()}</button>
+        <button class="audio-toggle-button" type="button" data-action="toggle-audio" data-audio-toggle>${getAudioToggleLabel()}</button>
       </div>
     </section>
   `;
+}
+
+function getGameplaySettings(): GameplaySettings {
+  return {
+    gravityDivisor: lowGravityEnabled ? LOW_GRAVITY_DIVISOR : 1,
+  };
+}
+
+function getLowGravityToggleLabel(): string {
+  return `Low Gravity: ${lowGravityEnabled ? 'On' : 'Off'}`;
 }
 
 function renderBudgetMenu(title: string, action: string, detail: string, backButton: string = ''): string {
@@ -1003,6 +1136,55 @@ function renderFleetBuildMenu(phase: Extract<AppPhase, { readonly name: 'fleetBu
   `;
 }
 
+function renderHotseatFleetBuildMenu(phase: Extract<AppPhase, { readonly name: 'hotseatFleetBuild' }>): string {
+  const readyText = phase.ready.every(Boolean) ? 'Both players ready. Starting...' : 'Each player builds a fleet, then presses Ready.';
+  return `
+    <section
+      class="fleet-builder-screen fleet-builder-screen-hotseat"
+      style="--fleet-builder-space: url('${legacyAssets.space.url}'); --fleet-builder-space-alt: url('${legacyAssets.space3.url}');"
+    >
+      <header class="fleet-builder-header">
+        <div>
+          <p class="menu-kicker">Hotseat</p>
+          <h2>Build Fleets</h2>
+          <p>${readyText} Gamepad 1 controls P1, gamepad 2 controls P2.</p>
+        </div>
+      </header>
+      <div class="fleet-builder-body">
+        <div class="fleet-stage fleet-stage-hotseat" aria-label="Hotseat fleet rosters">
+          ${renderHotseatFleetPanel(phase, 0)}
+          ${renderHotseatFleetPanel(phase, 1)}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderHotseatFleetPanel(phase: Extract<AppPhase, { readonly name: 'hotseatFleetBuild' }>, sideId: PlayerSide): string {
+  const fleet = phase.fleets[sideId];
+  const remaining = getRemainingBudget(fleet, phase.budget);
+  const pickingSlotIndex = getFleetBuilderPickingSlotIndex(sideId);
+  const ready = phase.ready[sideId];
+  const pickerHtml = pickingSlotIndex !== null ? renderFleetShipPicker(remaining, pickingSlotIndex, sideId) : '';
+  return renderFleetPanel({
+    fleet,
+    label: `${getSideName(sideId, 'hotseat')} Fleet`,
+    sideId,
+    isEditable: !ready,
+    isHidden: false,
+    pickerHtml,
+    controlsHtml: renderFleetCommandBlock(
+      remaining,
+      fleet.length,
+      ready ? 'Ready - Press To Edit' : 'Ready',
+      sideId === 0 ? 'Back' : 'Back',
+      pickingSlotIndex,
+      sideId,
+      ready,
+    ),
+  });
+}
+
 function renderFleetBuilderScreen(options: {
   readonly fleet: readonly FleetShip[];
   readonly budget: number;
@@ -1015,8 +1197,10 @@ function renderFleetBuilderScreen(options: {
   const fleets: readonly [readonly FleetShip[], readonly FleetShip[]] =
     options.activeSide === 0 ? [options.fleet, []] : [[], options.fleet];
   const pickingSlotIndex =
-    fleetBuilderPickingSlotIndex !== null && fleetBuilderPickingSlotIndex === options.fleet.length && options.fleet.length < MAX_FLEET_SLOTS
-      ? fleetBuilderPickingSlotIndex
+    fleetBuilderPickingSlotIndices[options.activeSide] !== null &&
+    fleetBuilderPickingSlotIndices[options.activeSide] === options.fleet.length &&
+    options.fleet.length < MAX_FLEET_SLOTS
+      ? fleetBuilderPickingSlotIndices[options.activeSide]
       : null;
   return `
     <div class="fleet-builder-body">
@@ -1024,23 +1208,25 @@ function renderFleetBuilderScreen(options: {
         ${renderFleetPanel({
           fleet: fleets[0],
           label: 'P1 Fleet',
+          sideId: 0,
           isEditable: options.activeSide === 0,
           isHidden: false,
-          pickerHtml: pickingSlotIndex !== null && options.activeSide === 0 ? renderFleetShipPicker(options.remaining, pickingSlotIndex) : '',
+          pickerHtml: pickingSlotIndex !== null && options.activeSide === 0 ? renderFleetShipPicker(options.remaining, pickingSlotIndex, 0) : '',
           controlsHtml:
             options.activeSide === 0
-              ? renderFleetCommandBlock(options.remaining, options.fleet.length, options.readyLabel, options.backLabel, pickingSlotIndex)
+              ? renderFleetCommandBlock(options.remaining, options.fleet.length, options.readyLabel, options.backLabel, pickingSlotIndex, 0)
               : '',
         })}
         ${renderFleetPanel({
           fleet: fleets[1],
           label: 'P2 Fleet',
+          sideId: 1,
           isEditable: options.activeSide === 1,
           isHidden: options.hideP2,
-          pickerHtml: pickingSlotIndex !== null && options.activeSide === 1 ? renderFleetShipPicker(options.remaining, pickingSlotIndex) : '',
+          pickerHtml: pickingSlotIndex !== null && options.activeSide === 1 ? renderFleetShipPicker(options.remaining, pickingSlotIndex, 1) : '',
           controlsHtml:
             options.activeSide === 1
-              ? renderFleetCommandBlock(options.remaining, options.fleet.length, options.readyLabel, options.backLabel, pickingSlotIndex)
+              ? renderFleetCommandBlock(options.remaining, options.fleet.length, options.readyLabel, options.backLabel, pickingSlotIndex, 1)
               : '',
         })}
       </div>
@@ -1054,6 +1240,8 @@ function renderFleetCommandBlock(
   readyLabel: string,
   backLabel: string,
   pickingSlotIndex: number | null,
+  sideId: PlayerSide,
+  isReady = false,
 ): string {
   return `
     <aside class="fleet-command-panel" aria-label="Fleet commands">
@@ -1066,18 +1254,25 @@ function renderFleetCommandBlock(
           <dt>Ships</dt>
           <dd>${fleetLength}/${MAX_FLEET_SLOTS}</dd>
         </div>
+        ${isReady ? '<div><dt>Status</dt><dd>Ready</dd></div>' : ''}
       </dl>
-      ${renderFleetCommandActions(fleetLength, readyLabel, backLabel, pickingSlotIndex)}
+      ${renderFleetCommandActions(fleetLength, readyLabel, backLabel, pickingSlotIndex, sideId)}
     </aside>
   `;
 }
 
-function renderFleetCommandActions(fleetLength: number, readyLabel: string, backLabel: string, pickingSlotIndex: number | null): string {
-  if (fleetBuilderConfirmingBack) {
+function renderFleetCommandActions(
+  fleetLength: number,
+  readyLabel: string,
+  backLabel: string,
+  pickingSlotIndex: number | null,
+  sideId: PlayerSide,
+): string {
+  if (fleetBuilderConfirmingBack[sideId]) {
     return `
       <div class="fleet-command-actions">
-        <button type="button" data-action="fleet-back-cancel" data-fleet-nav="command" data-fleet-nav-index="1">Stay</button>
-        <button type="button" class="fleet-danger-button" data-action="fleet-back-confirm" data-fleet-nav="command" data-fleet-nav-index="2">Confirm ${backLabel}</button>
+        <button type="button" data-action="fleet-back-cancel" data-fleet-side="${sideId}" data-fleet-nav="command" data-fleet-nav-index="1">Stay</button>
+        <button type="button" class="fleet-danger-button" data-action="fleet-back-confirm" data-fleet-side="${sideId}" data-fleet-nav="command" data-fleet-nav-index="2">Confirm ${backLabel}</button>
       </div>
     `;
   }
@@ -1085,17 +1280,17 @@ function renderFleetCommandActions(fleetLength: number, readyLabel: string, back
   const note = pickingSlotIndex === null ? '' : `<p class="fleet-command-note">Cancel returns to the fleet.</p>`;
   return `
     <div class="fleet-command-actions">
-      <button type="button" data-action="fleet-ready" data-fleet-nav="command" data-fleet-nav-index="0" ${fleetLength === 0 ? 'disabled' : ''}>${readyLabel}</button>
-      <button type="button" data-action="fleet-back-request" data-fleet-nav="command" data-fleet-nav-index="1">${backLabel}</button>
+      <button type="button" data-action="fleet-ready" data-fleet-side="${sideId}" data-fleet-nav="command" data-fleet-nav-index="0" ${fleetLength === 0 ? 'disabled' : ''}>${readyLabel}</button>
+      <button type="button" data-action="fleet-back-request" data-fleet-side="${sideId}" data-fleet-nav="command" data-fleet-nav-index="1">${backLabel}</button>
     </div>
     ${note}
   `;
 }
 
-function renderFleetShipPicker(remaining: number, slotIndex: number): string {
+function renderFleetShipPicker(remaining: number, slotIndex: number, sideId: PlayerSide): string {
   return `
     <section class="fleet-ship-picker" aria-label="Choose ship for slot ${slotIndex + 1}">
-      ${renderShipCatalogGrid(remaining)}
+      ${renderShipCatalogGrid(remaining, sideId)}
     </section>
   `;
 }
@@ -1103,6 +1298,7 @@ function renderFleetShipPicker(remaining: number, slotIndex: number): string {
 function renderFleetPanel(options: {
   readonly fleet: readonly FleetShip[];
   readonly label: string;
+  readonly sideId: PlayerSide;
   readonly isEditable: boolean;
   readonly isHidden: boolean;
   readonly pickerHtml: string;
@@ -1128,7 +1324,7 @@ function renderFleetPanel(options: {
             </div>
             <div class="${contentClass}">
               <div class="fleet-roster-frame">
-                ${renderFleetSlots(options.fleet, options.isEditable)}
+                ${renderFleetSlots(options.fleet, options.isEditable, options.sideId)}
               </div>
               ${options.controlsHtml}
             </div>
@@ -1138,12 +1334,12 @@ function renderFleetPanel(options: {
   `;
 }
 
-function renderFleetSlots(fleet: readonly FleetShip[], isEditable: boolean): string {
-  const slots = Array.from({ length: MAX_FLEET_SLOTS }, (_, index) => renderFleetSlot(index, fleet[index], isEditable, fleet.length));
+function renderFleetSlots(fleet: readonly FleetShip[], isEditable: boolean, sideId: PlayerSide): string {
+  const slots = Array.from({ length: MAX_FLEET_SLOTS }, (_, index) => renderFleetSlot(index, fleet[index], isEditable, fleet.length, sideId));
   return `<div class="fleet-slot-grid">${slots.join('')}</div>`;
 }
 
-function renderFleetSlot(index: number, fleetShip: FleetShip | undefined, isEditable: boolean, fleetLength: number): string {
+function renderFleetSlot(index: number, fleetShip: FleetShip | undefined, isEditable: boolean, fleetLength: number, sideId: PlayerSide): string {
   if (!fleetShip) {
     const isNextOpenSlot = isEditable && index === fleetLength && fleetLength < MAX_FLEET_SLOTS;
     if (isNextOpenSlot) {
@@ -1152,6 +1348,7 @@ function renderFleetSlot(index: number, fleetShip: FleetShip | undefined, isEdit
           type="button"
           class="fleet-slot fleet-slot-empty fleet-slot-open"
           data-action="fleet-slot-pick"
+          data-fleet-side="${sideId}"
           data-fleet-slot-index="${index}"
           data-fleet-nav="slot"
           data-fleet-nav-index="${index}"
@@ -1186,6 +1383,7 @@ function renderFleetSlot(index: number, fleetShip: FleetShip | undefined, isEdit
       type="button"
       class="fleet-slot fleet-slot-filled"
       data-action="fleet-remove"
+      data-fleet-side="${sideId}"
       data-fleet-uid="${fleetShip.uid}"
       data-fleet-nav="slot"
       data-fleet-nav-index="${index}"
@@ -1199,15 +1397,15 @@ function renderFleetSlot(index: number, fleetShip: FleetShip | undefined, isEdit
   `;
 }
 
-function renderShipCatalogGrid(remaining: number): string {
+function renderShipCatalogGrid(remaining: number, sideId: PlayerSide): string {
   return `
     <div class="fleet-catalog-grid">
-      ${SHIP_CATALOG.map((ship, index) => renderCatalogCard(ship.id, remaining, index)).join('')}
+      ${SHIP_CATALOG.map((ship, index) => renderCatalogCard(ship.id, remaining, index, sideId)).join('')}
     </div>
   `;
 }
 
-function renderCatalogCard(shipId: ShipCatalogId, remaining: number, catalogIndex = 0): string {
+function renderCatalogCard(shipId: ShipCatalogId, remaining: number, catalogIndex = 0, sideId: PlayerSide = 0): string {
   const ship = getShipCatalogEntry(shipId);
   const disabled = ship.cost > remaining ? 'disabled' : '';
   return `
@@ -1215,6 +1413,7 @@ function renderCatalogCard(shipId: ShipCatalogId, remaining: number, catalogInde
       type="button"
       class="fleet-picker-ship"
       data-action="fleet-pick-ship"
+      data-fleet-side="${sideId}"
       data-ship-id="${ship.id}"
       data-fleet-nav="picker"
       data-fleet-nav-index="${catalogIndex}"
@@ -1243,7 +1442,11 @@ function renderShipThumb(shipId: ShipCatalogId, className: string): string {
 }
 
 function isFleetBuilderPhase(): boolean {
-  return appPhase.name === 'fleetBuild' || appPhase.name === 'networkFleetBuild';
+  return appPhase.name === 'fleetBuild' || appPhase.name === 'networkFleetBuild' || appPhase.name === 'hotseatFleetBuild';
+}
+
+function isShipSelectPhase(): boolean {
+  return appPhase.name === 'shipSelect' || appPhase.name === 'hotseatShipSelect';
 }
 
 function handleFleetBuilderKeyboardNav(event: KeyboardEvent): boolean {
@@ -1273,34 +1476,106 @@ function handleFleetBuilderKeyboardNav(event: KeyboardEvent): boolean {
   return false;
 }
 
+function handleShipSelectKeyboardNav(event: KeyboardEvent): boolean {
+  if (!isShipSelectPhase()) {
+    return false;
+  }
+
+  const directionInput = readShipSelectKeyboardDirection(event.code);
+  if (directionInput) {
+    event.preventDefault();
+    focusShipSelectNav(directionInput.direction, directionInput.sideId);
+    return true;
+  }
+
+  const activateSide = readShipSelectKeyboardActivateSide(event.code);
+  if (activateSide !== null) {
+    event.preventDefault();
+    activateShipSelectFocusedControl(activateSide);
+    return true;
+  }
+
+  return false;
+}
+
 function updateFleetBuilderGamepadNav(): void {
   if (!isFleetBuilderPhase()) {
-    previousFleetBuilderInput = 0;
-    fleetBuilderNavRepeatFrames = 0;
+    previousFleetBuilderInputs = [0, 0];
+    fleetBuilderNavRepeatFrames = [0, 0];
     return;
   }
 
-  const input = readGamepadMenuInput(0);
-  const pressed = input & ~previousFleetBuilderInput;
-  if (fleetBuilderNavRepeatFrames > 0) {
-    fleetBuilderNavRepeatFrames -= 1;
+  updateFleetBuilderGamepadNavForSide(0);
+  if (appPhase.name === 'hotseatFleetBuild') {
+    updateFleetBuilderGamepadNavForSide(1);
+  }
+}
+
+function updateShipSelectGamepadNav(): void {
+  if (!isShipSelectPhase()) {
+    previousShipSelectInputs = [0, 0];
+    shipSelectNavRepeatFrames = [0, 0];
+    return;
   }
 
-  const direction = readFleetBuilderInputDirection(pressed) ?? (fleetBuilderNavRepeatFrames === 0 ? readFleetBuilderInputDirection(input) : null);
+  updateShipSelectGamepadNavForSide(0);
+  if (appPhase.name === 'hotseatShipSelect') {
+    updateShipSelectGamepadNavForSide(1);
+  }
+}
+
+function updateShipSelectGamepadNavForSide(sideId: PlayerSide): void {
+  if (!isShipSelectSideActive(sideId)) {
+    previousShipSelectInputs[sideId] = 0;
+    shipSelectNavRepeatFrames[sideId] = 0;
+    return;
+  }
+
+  const input = readGamepadMenuInput(sideId);
+  const pressed = input & ~previousShipSelectInputs[sideId];
+  if (shipSelectNavRepeatFrames[sideId] > 0) {
+    shipSelectNavRepeatFrames[sideId] -= 1;
+  }
+
+  const direction =
+    readFleetBuilderInputDirection(pressed) ?? (shipSelectNavRepeatFrames[sideId] === 0 ? readFleetBuilderInputDirection(input) : null);
   if (direction) {
-    focusFleetBuilderNav(direction);
-    fleetBuilderNavRepeatFrames = FLEET_NAV_REPEAT_FRAMES;
+    focusShipSelectNav(direction, sideId);
+    shipSelectNavRepeatFrames[sideId] = FLEET_NAV_REPEAT_FRAMES;
   } else if (input === 0) {
-    fleetBuilderNavRepeatFrames = 0;
+    shipSelectNavRepeatFrames[sideId] = 0;
   }
 
   if ((pressed & MenuInputBits.Primary) !== 0) {
-    activateFleetBuilderFocusedControl();
-  } else if ((pressed & MenuInputBits.Secondary) !== 0) {
-    activateFleetBuilderBackControl();
+    activateShipSelectFocusedControl(sideId);
   }
 
-  previousFleetBuilderInput = input;
+  previousShipSelectInputs[sideId] = input;
+}
+
+function updateFleetBuilderGamepadNavForSide(sideId: PlayerSide): void {
+  const input = readGamepadMenuInput(sideId);
+  const pressed = input & ~previousFleetBuilderInputs[sideId];
+  if (fleetBuilderNavRepeatFrames[sideId] > 0) {
+    fleetBuilderNavRepeatFrames[sideId] -= 1;
+  }
+
+  const direction =
+    readFleetBuilderInputDirection(pressed) ?? (fleetBuilderNavRepeatFrames[sideId] === 0 ? readFleetBuilderInputDirection(input) : null);
+  if (direction) {
+    focusFleetBuilderNav(direction, sideId);
+    fleetBuilderNavRepeatFrames[sideId] = FLEET_NAV_REPEAT_FRAMES;
+  } else if (input === 0) {
+    fleetBuilderNavRepeatFrames[sideId] = 0;
+  }
+
+  if ((pressed & MenuInputBits.Primary) !== 0) {
+    activateFleetBuilderFocusedControl(sideId);
+  } else if ((pressed & MenuInputBits.Secondary) !== 0) {
+    activateFleetBuilderBackControl(sideId);
+  }
+
+  previousFleetBuilderInputs[sideId] = input;
 }
 
 function readFleetBuilderKeyboardDirection(code: string): FleetBuilderNavDirection | null {
@@ -1320,6 +1595,46 @@ function readFleetBuilderKeyboardDirection(code: string): FleetBuilderNavDirecti
     default:
       return null;
   }
+}
+
+function readShipSelectKeyboardDirection(code: string): { readonly sideId: PlayerSide; readonly direction: FleetBuilderNavDirection } | null {
+  const p1Direction = readFleetBuilderKeyboardDirection(code);
+  if (p1Direction) {
+    return { sideId: 0, direction: p1Direction };
+  }
+
+  if (appPhase.name !== 'hotseatShipSelect') {
+    return null;
+  }
+
+  switch (code) {
+    case 'KeyI':
+      return { sideId: 1, direction: 'up' };
+    case 'KeyK':
+      return { sideId: 1, direction: 'down' };
+    case 'KeyJ':
+      return { sideId: 1, direction: 'left' };
+    case 'KeyL':
+      return { sideId: 1, direction: 'right' };
+    default:
+      return null;
+  }
+}
+
+function readShipSelectKeyboardActivateSide(code: string): PlayerSide | null {
+  if (code === 'Space') {
+    return 0;
+  }
+
+  if (code === 'Enter' || code === 'NumpadEnter') {
+    const active = getActiveShipSelectButton(1) ?? getActiveShipSelectButton(0);
+    if (active) {
+      return readFleetSide(active);
+    }
+    return appPhase.name === 'hotseatShipSelect' ? 1 : 0;
+  }
+
+  return null;
 }
 
 function readFleetBuilderInputDirection(input: number): FleetBuilderNavDirection | null {
@@ -1342,20 +1657,20 @@ function readFleetBuilderInputDirection(input: number): FleetBuilderNavDirection
 function queueFleetBuilderFocusRestore(): void {
   window.setTimeout(() => {
     if (isFleetBuilderPhase()) {
-      restoreFleetBuilderFocus();
+      restoreFleetBuilderFocus(0);
     }
   }, 0);
 }
 
-function restoreFleetBuilderFocus(): HTMLButtonElement | null {
-  const activeButton = getActiveFleetBuilderButton();
+function restoreFleetBuilderFocus(sideId: PlayerSide): HTMLButtonElement | null {
+  const activeButton = getActiveFleetBuilderButton(sideId);
   if (activeButton) {
-    rememberFleetBuilderNavTarget(activeButton);
+    rememberFleetBuilderNavTarget(activeButton, sideId);
     return activeButton;
   }
 
-  const buttons = getFleetBuilderNavButtons();
-  const previousTarget = fleetBuilderNavTarget;
+  const buttons = getFleetBuilderNavButtons(sideId);
+  const previousTarget = fleetBuilderNavTargets[sideId];
   const targetButton =
     (previousTarget
       ? buttons.find((button) => button.dataset.fleetNav === previousTarget.nav && Number(button.dataset.fleetNavIndex) === previousTarget.index)
@@ -1367,14 +1682,45 @@ function restoreFleetBuilderFocus(): HTMLButtonElement | null {
 
   targetButton?.focus();
   if (targetButton) {
-    rememberFleetBuilderNavTarget(targetButton);
+    rememberFleetBuilderNavTarget(targetButton, sideId);
   }
   return targetButton;
 }
 
-function focusFleetBuilderNav(direction: FleetBuilderNavDirection): void {
-  const buttons = getFleetBuilderNavButtons();
-  const current = getActiveFleetBuilderButton() ?? restoreFleetBuilderFocus();
+function queueShipSelectFocusRestore(): void {
+  window.setTimeout(() => {
+    if (isShipSelectPhase()) {
+      restoreShipSelectFocus(getDefaultShipSelectSide());
+    }
+  }, 0);
+}
+
+function restoreShipSelectFocus(sideId: PlayerSide): HTMLButtonElement | null {
+  if (!isShipSelectSideActive(sideId)) {
+    return null;
+  }
+
+  const activeButton = getActiveShipSelectButton(sideId);
+  if (activeButton) {
+    rememberShipSelectNavTarget(activeButton, sideId);
+    return activeButton;
+  }
+
+  const buttons = getShipSelectNavButtons(sideId);
+  const previousTarget = shipSelectNavTargets[sideId];
+  const targetButton =
+    (previousTarget ? buttons.find((button) => Number(button.dataset.shipSelectNavIndex) === previousTarget.index) : null) ?? buttons[0] ?? null;
+
+  targetButton?.focus();
+  if (targetButton) {
+    rememberShipSelectNavTarget(targetButton, sideId);
+  }
+  return targetButton;
+}
+
+function focusFleetBuilderNav(direction: FleetBuilderNavDirection, sideId: PlayerSide = 0): void {
+  const buttons = getFleetBuilderNavButtons(sideId);
+  const current = getActiveFleetBuilderButton(sideId) ?? restoreFleetBuilderFocus(sideId);
   if (!current) {
     return;
   }
@@ -1409,47 +1755,134 @@ function focusFleetBuilderNav(direction: FleetBuilderNavDirection): void {
 
   if (bestButton) {
     bestButton.focus();
-    rememberFleetBuilderNavTarget(bestButton);
+    rememberFleetBuilderNavTarget(bestButton, sideId);
   }
 }
 
-function activateFleetBuilderFocusedControl(): void {
-  const button = getActiveFleetBuilderButton() ?? restoreFleetBuilderFocus();
+function focusShipSelectNav(direction: FleetBuilderNavDirection, sideId: PlayerSide = 0): void {
+  if (!isShipSelectSideActive(sideId)) {
+    return;
+  }
+
+  const buttons = getShipSelectNavButtons(sideId);
+  const current = getActiveShipSelectButton(sideId) ?? restoreShipSelectFocus(sideId);
+  if (!current) {
+    return;
+  }
+
+  const currentRect = current.getBoundingClientRect();
+  const currentCenter = getRectCenter(currentRect);
+  let bestButton: HTMLButtonElement | null = null;
+  let bestScore = Number.POSITIVE_INFINITY;
+
+  for (const candidate of buttons) {
+    if (candidate === current) {
+      continue;
+    }
+
+    const candidateRect = candidate.getBoundingClientRect();
+    const candidateCenter = getRectCenter(candidateRect);
+    const dx = candidateCenter.x - currentCenter.x;
+    const dy = candidateCenter.y - currentCenter.y;
+    const primaryDistance = direction === 'left' || direction === 'right' ? Math.abs(dx) : Math.abs(dy);
+    const secondaryDistance = direction === 'left' || direction === 'right' ? Math.abs(dy) : Math.abs(dx);
+
+    if (!isCandidateInDirection(direction, dx, dy)) {
+      continue;
+    }
+
+    const score = primaryDistance * 1.4 + secondaryDistance;
+    if (score < bestScore) {
+      bestScore = score;
+      bestButton = candidate;
+    }
+  }
+
+  if (bestButton) {
+    bestButton.focus();
+    rememberShipSelectNavTarget(bestButton, sideId);
+  }
+}
+
+function activateFleetBuilderFocusedControl(sideId: PlayerSide = 0): void {
+  const button = getActiveFleetBuilderButton(sideId) ?? restoreFleetBuilderFocus(sideId);
   button?.click();
 }
 
-function activateFleetBuilderBackControl(): void {
-  if (fleetBuilderPickingSlotIndex !== null) {
-    cancelFleetBuilderShipPicker();
+function activateShipSelectFocusedControl(sideId: PlayerSide = 0): void {
+  const button = getActiveShipSelectButton(sideId) ?? restoreShipSelectFocus(sideId);
+  button?.click();
+}
+
+function activateFleetBuilderBackControl(sideId: PlayerSide = 0): void {
+  if (fleetBuilderPickingSlotIndices[sideId] !== null) {
+    cancelFleetBuilderShipPicker(sideId);
     return;
   }
 
-  if (fleetBuilderConfirmingBack) {
-    cancelFleetBuilderBackConfirmation();
+  if (fleetBuilderConfirmingBack[sideId]) {
+    cancelFleetBuilderBackConfirmation(sideId);
     return;
   }
 
-  const backButton = menuOverlay.querySelector<HTMLButtonElement>('button[data-action="fleet-back-request"]');
+  const backButton = menuOverlay.querySelector<HTMLButtonElement>(`button[data-action="fleet-back-request"][data-fleet-side="${sideId}"]`);
   backButton?.click();
 }
 
-function getActiveFleetBuilderButton(): HTMLButtonElement | null {
+function getActiveFleetBuilderButton(sideId: PlayerSide): HTMLButtonElement | null {
   const active = document.activeElement;
-  if (!(active instanceof HTMLButtonElement) || !menuOverlay.contains(active) || !active.dataset.fleetNav || active.disabled) {
+  if (
+    !(active instanceof HTMLButtonElement) ||
+    !menuOverlay.contains(active) ||
+    !active.dataset.fleetNav ||
+    active.dataset.fleetSide !== String(sideId) ||
+    active.disabled
+  ) {
     return null;
   }
 
   return active;
 }
 
-function getFleetBuilderNavButtons(): HTMLButtonElement[] {
-  return Array.from(menuOverlay.querySelectorAll<HTMLButtonElement>('button[data-fleet-nav]')).filter((button) => !button.disabled);
+function getFleetBuilderNavButtons(sideId: PlayerSide): HTMLButtonElement[] {
+  return Array.from(menuOverlay.querySelectorAll<HTMLButtonElement>(`button[data-fleet-nav][data-fleet-side="${sideId}"]`)).filter(
+    (button) => !button.disabled,
+  );
 }
 
-function rememberFleetBuilderNavTarget(button: HTMLButtonElement): void {
+function getActiveShipSelectButton(sideId: PlayerSide): HTMLButtonElement | null {
+  const active = document.activeElement;
+  if (
+    !(active instanceof HTMLButtonElement) ||
+    !menuOverlay.contains(active) ||
+    !active.dataset.shipSelectNav ||
+    active.dataset.fleetSide !== String(sideId) ||
+    active.disabled
+  ) {
+    return null;
+  }
+
+  return active;
+}
+
+function getShipSelectNavButtons(sideId: PlayerSide): HTMLButtonElement[] {
+  return Array.from(menuOverlay.querySelectorAll<HTMLButtonElement>(`button[data-ship-select-nav][data-fleet-side="${sideId}"]`)).filter(
+    (button) => !button.disabled,
+  );
+}
+
+function rememberFleetBuilderNavTarget(button: HTMLButtonElement, sideId: PlayerSide): void {
   const index = Number(button.dataset.fleetNavIndex);
-  fleetBuilderNavTarget = {
+  fleetBuilderNavTargets[sideId] = {
     nav: button.dataset.fleetNav ?? 'catalog',
+    index: Number.isFinite(index) ? index : 0,
+  };
+}
+
+function rememberShipSelectNavTarget(button: HTMLButtonElement, sideId: PlayerSide): void {
+  const index = Number(button.dataset.shipSelectNavIndex);
+  shipSelectNavTargets[sideId] = {
+    nav: button.dataset.shipSelectNav ?? 'slot',
     index: Number.isFinite(index) ? index : 0,
   };
 }
@@ -1475,90 +1908,181 @@ function isCandidateInDirection(direction: FleetBuilderNavDirection, dx: number,
   }
 }
 
-function selectFleetBuilderSlot(slotIndex: number): void {
-  if (appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') {
+function selectFleetBuilderSlot(slotIndex: number, sideId: PlayerSide = 0): void {
+  const fleet = getEditableFleet(sideId);
+  if (!fleet) {
     return;
   }
 
-  if (slotIndex !== appPhase.fleet.length || appPhase.fleet.length >= MAX_FLEET_SLOTS) {
+  if (slotIndex !== fleet.length || fleet.length >= MAX_FLEET_SLOTS) {
     return;
   }
 
-  fleetBuilderPickingSlotIndex = slotIndex;
-  fleetBuilderConfirmingBack = false;
-  fleetBuilderNavTarget = { nav: 'picker', index: 0 };
+  fleetBuilderPickingSlotIndices[sideId] = slotIndex;
+  fleetBuilderConfirmingBack[sideId] = false;
+  fleetBuilderNavTargets[sideId] = { nav: 'picker', index: 0 };
   renderMenu();
 }
 
-function cancelFleetBuilderShipPicker(): void {
-  if (appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') {
+function cancelFleetBuilderShipPicker(sideId: PlayerSide = 0): void {
+  const fleet = getEditableFleet(sideId);
+  if (!fleet) {
     return;
   }
 
-  const slotIndex = fleetBuilderPickingSlotIndex ?? appPhase.fleet.length;
-  fleetBuilderPickingSlotIndex = null;
-  fleetBuilderConfirmingBack = false;
-  fleetBuilderNavTarget = { nav: 'slot', index: Math.min(slotIndex, MAX_FLEET_SLOTS - 1) };
+  const slotIndex = fleetBuilderPickingSlotIndices[sideId] ?? fleet.length;
+  fleetBuilderPickingSlotIndices[sideId] = null;
+  fleetBuilderConfirmingBack[sideId] = false;
+  fleetBuilderNavTargets[sideId] = { nav: 'slot', index: Math.min(slotIndex, MAX_FLEET_SLOTS - 1) };
   renderMenu();
 }
 
-function requestFleetBuilderBackConfirmation(): void {
-  if (appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') {
+function requestFleetBuilderBackConfirmation(sideId: PlayerSide = 0): void {
+  if (!isFleetBuilderPhase()) {
     return;
   }
 
-  fleetBuilderPickingSlotIndex = null;
-  fleetBuilderConfirmingBack = true;
-  fleetBuilderNavTarget = { nav: 'command', index: 1 };
+  fleetBuilderPickingSlotIndices[sideId] = null;
+  fleetBuilderConfirmingBack[sideId] = true;
+  fleetBuilderNavTargets[sideId] = { nav: 'command', index: 1 };
   renderMenu();
 }
 
-function cancelFleetBuilderBackConfirmation(): void {
-  if (appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') {
+function cancelFleetBuilderBackConfirmation(sideId: PlayerSide = 0): void {
+  if (!isFleetBuilderPhase()) {
     return;
   }
 
-  fleetBuilderConfirmingBack = false;
-  fleetBuilderNavTarget = { nav: 'command', index: 1 };
+  fleetBuilderConfirmingBack[sideId] = false;
+  fleetBuilderNavTargets[sideId] = { nav: 'command', index: 1 };
   renderMenu();
 }
 
 function confirmFleetBuilderBack(): void {
-  if (appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') {
+  if (!isFleetBuilderPhase()) {
     return;
   }
 
-  fleetBuilderConfirmingBack = false;
+  fleetBuilderConfirmingBack = [false, false];
   goBack();
 }
 
 function renderShipSelectMenu(phase: Extract<AppPhase, { readonly name: 'shipSelect' }>): string {
-  const playerFleet = phase.session.fleets[0].filter((ship) => ship.alive);
   return `
     <section class="menu-card menu-card-wide">
       ${renderMenuBrand()}
       <p class="menu-kicker">Choose Your Champion</p>
       <h2>Select Ship</h2>
       <p>${phase.message ?? 'The loser picks a new ship. The winner stays in the arena.'}</p>
-      <div class="ship-card-grid">
-        ${playerFleet.map((fleetShip) => {
-          const ship = getShipCatalogEntry(fleetShip.catalogId);
-          return `
-            <article class="ship-card">
-              <h3>${ship.name}</h3>
-              <p>Crew ${ship.crew} | Battery ${ship.battery}</p>
-              <button type="button" data-action="ship-pick" data-fleet-uid="${fleetShip.uid}">Fight With ${ship.name}</button>
-            </article>
-          `;
-        }).join('')}
+      ${renderShipSelectFleetGrid(phase.session.fleets[0], 0)}
+    </section>
+  `;
+}
+
+function renderHotseatShipSelectMenu(phase: Extract<AppPhase, { readonly name: 'hotseatShipSelect' }>): string {
+  return `
+    <section class="hotseat-ship-select">
+      <header class="hotseat-select-header">
+        <div>
+          <p class="menu-kicker">Hotseat Ship Select</p>
+          <h2>Select Ships</h2>
+        </div>
+        <p>${phase.message ?? 'The losing player picks a new ship. The winner stays in the arena.'}</p>
+      </header>
+      <div class="hotseat-select-grid">
+        ${([0, 1] as const)
+          .map((sideId) => renderHotseatShipSelectPanel(phase.session, sideId, phase.selectingSideIds.includes(sideId)))
+          .join('')}
       </div>
     </section>
   `;
 }
 
+function renderHotseatShipSelectPanel(session: BattleSession, sideId: PlayerSide, isSelecting: boolean): string {
+  const selectedShip = getSelectedFleetShip(session, sideId);
+  const status = isSelecting ? 'Choose a ship' : selectedShip ? `${getShipCatalogEntry(selectedShip.catalogId).name} locked in` : 'Waiting';
+  return `
+    <section class="hotseat-select-panel${isSelecting ? '' : ' hotseat-select-panel-locked'}" aria-label="${getSideName(sideId, 'hotseat')} ship selection">
+      <h3>${getSideName(sideId, 'hotseat')}</h3>
+      <p class="hotseat-select-status">${status}</p>
+      ${renderShipSelectFleetGrid(session.fleets[sideId], sideId, isSelecting, selectedShip?.uid ?? null)}
+    </section>
+  `;
+}
+
+function renderShipSelectFleetGrid(
+  fleet: readonly FleetShip[],
+  sideId: PlayerSide,
+  isSelecting = true,
+  selectedUid: string | null = null,
+): string {
+  const slots = Array.from({ length: MAX_FLEET_SLOTS }, (_, index) => renderShipSelectFleetSlot(index, fleet[index], sideId, isSelecting, selectedUid));
+  return `
+    <div class="ship-select-roster-frame">
+      <div class="fleet-slot-grid ship-select-slot-grid">
+        ${slots.join('')}
+      </div>
+    </div>
+  `;
+}
+
+function renderShipSelectFleetSlot(
+  index: number,
+  fleetShip: FleetShip | undefined,
+  sideId: PlayerSide,
+  isSelecting = true,
+  selectedUid: string | null = null,
+): string {
+  if (!fleetShip) {
+    return `
+      <div class="fleet-slot fleet-slot-empty ship-select-slot-empty" aria-label="Empty fleet slot ${index + 1}">
+        <span>${index + 1}</span>
+      </div>
+    `;
+  }
+
+  const ship = getShipCatalogEntry(fleetShip.catalogId);
+  const defeatedClass = fleetShip.alive ? '' : ' ship-select-slot-defeated';
+  const defeatedOverlay = fleetShip.alive ? '' : '<span class="ship-select-defeated-mark" aria-hidden="true">X</span>';
+  const selectedClass = fleetShip.uid === selectedUid ? ' ship-select-slot-selected' : '';
+  const selectedOverlay = fleetShip.uid === selectedUid ? '<span class="ship-select-selected-mark" aria-hidden="true">Locked</span>' : '';
+  const label = fleetShip.alive ? `Fight with ${ship.name} from slot ${index + 1}` : `${ship.name} in slot ${index + 1} was defeated`;
+  const content = `
+    <span class="fleet-slot-number">${index + 1}</span>
+    ${renderShipThumb(fleetShip.catalogId, 'fleet-slot-ship')}
+    <span class="fleet-slot-name">${ship.name}</span>
+    <span class="fleet-slot-cost">${ship.cost}</span>
+    ${defeatedOverlay}
+    ${selectedOverlay}
+  `;
+
+  if (!fleetShip.alive || !isSelecting) {
+    return `
+      <div class="fleet-slot fleet-slot-filled ship-select-slot${defeatedClass}${selectedClass}" aria-label="${label}">
+        ${content}
+      </div>
+    `;
+  }
+
+  return `
+    <button
+      type="button"
+      class="fleet-slot fleet-slot-filled ship-select-slot${selectedClass}"
+      data-action="ship-pick"
+      data-fleet-side="${sideId}"
+      data-fleet-uid="${fleetShip.uid}"
+      data-ship-select-nav="slot"
+      data-ship-select-nav-index="${index}"
+      aria-label="${label}"
+    >
+      ${content}
+    </button>
+  `;
+}
+
 function renderRoundResultMenu(phase: Extract<AppPhase, { readonly name: 'roundResult' }>): string {
-  const winnerName = getSideName(phase.winnerId);
-  const loserName = getSideName(phase.loserId);
+  const winnerName = getSideName(phase.winnerId, phase.session.mode);
+  const loserName = getSideName(phase.loserId, phase.session.mode);
   return `
     <section class="menu-card">
       ${renderMenuBrand()}
@@ -1704,12 +2228,33 @@ function renderMenuBrand(): string {
   `;
 }
 
-function addShipToPlayerFleet(shipId: ShipCatalogId): void {
-  if (appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') {
+function addShipToPlayerFleet(shipId: ShipCatalogId, sideId: PlayerSide = 0): void {
+  if (appPhase.name === 'hotseatFleetBuild') {
+    const fleet = getEditableFleet(sideId);
+    if (!fleet || fleet.length >= MAX_FLEET_SLOTS) {
+      return;
+    }
+
+    const ship = getShipCatalogEntry(shipId);
+    if (ship.cost > getRemainingBudget(fleet, appPhase.budget)) {
+      return;
+    }
+
+    fleetSerial += 1;
+    const nextShip = { uid: `${sideId === 0 ? 'p1' : 'p2'}-${fleetSerial}`, catalogId: shipId, alive: true };
+    appPhase = {
+      ...appPhase,
+      fleets: updateFleetForSide(appPhase.fleets, sideId, [...fleet, nextShip]),
+      ready: updateReadyForSide(appPhase.ready, sideId, false),
+    };
+    fleetBuilderPickingSlotIndices[sideId] = null;
+    fleetBuilderConfirmingBack[sideId] = false;
+    fleetBuilderNavTargets[sideId] = { nav: 'slot', index: Math.min(fleet.length, MAX_FLEET_SLOTS - 1) };
+    renderMenu();
     return;
   }
 
-  if (appPhase.fleet.length >= MAX_FLEET_SLOTS) {
+  if ((appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') || sideId !== 0 || appPhase.fleet.length >= MAX_FLEET_SLOTS) {
     return;
   }
 
@@ -1723,14 +2268,35 @@ function addShipToPlayerFleet(shipId: ShipCatalogId): void {
     ...appPhase,
     fleet: [...appPhase.fleet, { uid: `player-${fleetSerial}`, catalogId: shipId, alive: true }],
   };
-  fleetBuilderPickingSlotIndex = null;
-  fleetBuilderConfirmingBack = false;
-  fleetBuilderNavTarget = { nav: 'slot', index: Math.min(appPhase.fleet.length, MAX_FLEET_SLOTS - 1) };
+  fleetBuilderPickingSlotIndices[0] = null;
+  fleetBuilderConfirmingBack[0] = false;
+  fleetBuilderNavTargets[0] = { nav: 'slot', index: Math.min(appPhase.fleet.length, MAX_FLEET_SLOTS - 1) };
   renderMenu();
 }
 
-function removeShipFromPlayerFleet(uid: string): void {
-  if (appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') {
+function removeShipFromPlayerFleet(uid: string, sideId: PlayerSide = 0): void {
+  if (appPhase.name === 'hotseatFleetBuild') {
+    const fleet = getEditableFleet(sideId);
+    if (!fleet) {
+      return;
+    }
+
+    appPhase = {
+      ...appPhase,
+      fleets: updateFleetForSide(
+        appPhase.fleets,
+        sideId,
+        fleet.filter((ship) => ship.uid !== uid),
+      ),
+      ready: updateReadyForSide(appPhase.ready, sideId, false),
+    };
+    fleetBuilderPickingSlotIndices[sideId] = null;
+    fleetBuilderConfirmingBack[sideId] = false;
+    renderMenu();
+    return;
+  }
+
+  if ((appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') || sideId !== 0) {
     return;
   }
 
@@ -1738,8 +2304,30 @@ function removeShipFromPlayerFleet(uid: string): void {
     ...appPhase,
     fleet: appPhase.fleet.filter((ship) => ship.uid !== uid),
   };
-  fleetBuilderPickingSlotIndex = null;
-  fleetBuilderConfirmingBack = false;
+  fleetBuilderPickingSlotIndices[0] = null;
+  fleetBuilderConfirmingBack[0] = false;
+  renderMenu();
+}
+
+function toggleHotseatFleetReady(sideId: PlayerSide): void {
+  if (appPhase.name !== 'hotseatFleetBuild') {
+    return;
+  }
+
+  const fleet = appPhase.fleets[sideId];
+  if (fleet.length === 0) {
+    return;
+  }
+
+  const nextReady = updateReadyForSide(appPhase.ready, sideId, !appPhase.ready[sideId]);
+  appPhase = { ...appPhase, ready: nextReady };
+  fleetBuilderPickingSlotIndices[sideId] = null;
+  fleetBuilderConfirmingBack[sideId] = false;
+  fleetBuilderNavTargets[sideId] = { nav: 'command', index: 0 };
+  if (nextReady.every(Boolean)) {
+    startHotseatRun();
+    return;
+  }
   renderMenu();
 }
 
@@ -1757,11 +2345,27 @@ function startSinglePlayerRun(): void {
   }
 
   const session: BattleSession = {
+    mode: 'single',
     budget: appPhase.budget,
     fleets: [appPhase.fleet, aiFleet],
     selectedShipUids: [null, aiShip.uid],
   };
   appPhase = { name: 'shipSelect', session, message: 'Pick the first ship for your fleet.' };
+  renderMenu();
+}
+
+function startHotseatRun(): void {
+  if (appPhase.name !== 'hotseatFleetBuild' || !appPhase.ready.every(Boolean) || appPhase.fleets.some((fleet) => fleet.length === 0)) {
+    return;
+  }
+
+  const session: BattleSession = {
+    mode: 'hotseat',
+    budget: appPhase.budget,
+    fleets: appPhase.fleets,
+    selectedShipUids: [null, null],
+  };
+  appPhase = { name: 'hotseatShipSelect', session, selectingSideIds: [0, 1], message: 'Both players pick the first ship for their fleets.' };
   renderMenu();
 }
 
@@ -1813,7 +2417,12 @@ function autoReadyAiJoiner(budget: number, lobbyId: string): void {
   log(`AI joiner auto-ready with ${getShipCatalogEntry(selectedShip).name}. Waiting for host config...`);
 }
 
-function choosePlayerShip(uid: string): void {
+function choosePlayerShip(uid: string, sideId: PlayerSide = 0): void {
+  if (appPhase.name === 'hotseatShipSelect') {
+    chooseHotseatShip(uid, sideId);
+    return;
+  }
+
   if (appPhase.name !== 'shipSelect') {
     return;
   }
@@ -1829,6 +2438,27 @@ function choosePlayerShip(uid: string): void {
   startLocalFight(withSelectedShip(session, 1, aiSelectedUid));
 }
 
+function chooseHotseatShip(uid: string, sideId: PlayerSide): void {
+  if (appPhase.name !== 'hotseatShipSelect' || !appPhase.selectingSideIds.includes(sideId)) {
+    return;
+  }
+
+  const livingShip = appPhase.session.fleets[sideId].find((ship) => ship.uid === uid && ship.alive);
+  if (!livingShip) {
+    return;
+  }
+
+  const session = withSelectedShip(appPhase.session, sideId, uid);
+  const selectingSideIds = appPhase.selectingSideIds.filter((candidate) => candidate !== sideId);
+  if (selectingSideIds.length > 0) {
+    appPhase = { ...appPhase, session, selectingSideIds, message: `${getSideName(sideId, 'hotseat')} locked in. Waiting for the other player.` };
+    renderMenu();
+    return;
+  }
+
+  startHotseatFight(session);
+}
+
 function startLocalFight(session: BattleSession): void {
   const playerShip = getSelectedFleetShip(session, 0);
   const opponentShip = getSelectedFleetShip(session, 1);
@@ -1842,8 +2472,31 @@ function startLocalFight(session: BattleSession): void {
   currentLoadout = [playerShip.catalogId, opponentShip.catalogId];
   renderer.setShipLoadout(currentLoadout);
   renderHud(currentLoadout);
-  state = createInitialState(Date.now() >>> 0, currentLoadout);
+  state = createInitialState(Date.now() >>> 0, currentLoadout, getGameplaySettings());
   appPhase = { name: 'fighting', session, handledWinnerId: null };
+  renderMenu();
+}
+
+function startHotseatFight(session: BattleSession): void {
+  const playerOneShip = getSelectedFleetShip(session, 0);
+  const playerTwoShip = getSelectedFleetShip(session, 1);
+  if (!playerOneShip || !playerTwoShip) {
+    appPhase = {
+      name: 'hotseatShipSelect',
+      session,
+      selectingSideIds: getSidesNeedingSelection(session),
+      message: 'Pick living ships before fighting.',
+    };
+    renderMenu();
+    return;
+  }
+
+  closePeer();
+  currentLoadout = [playerOneShip.catalogId, playerTwoShip.catalogId];
+  renderer.setShipLoadout(currentLoadout);
+  renderHud(currentLoadout);
+  state = createInitialState(Date.now() >>> 0, currentLoadout, getGameplaySettings());
+  appPhase = { name: 'hotseatFighting', session, handledWinnerId: null };
   renderMenu();
 }
 
@@ -1862,8 +2515,15 @@ function resolveLocalRound(session: BattleSession, winnerId: number): void {
   if (!hasLivingShips(nextSession.fleets[loserId])) {
     appPhase = {
       name: 'finalResult',
-      title: `${getSideName(winnerId)} wins`,
-      detail: `${getSideName(loserId)} has no ships remaining.`,
+      title: `${getSideName(winnerId, nextSession.mode)} wins`,
+      detail: `${getSideName(loserId, nextSession.mode)} has no ships remaining.`,
+    };
+  } else if (nextSession.mode === 'hotseat') {
+    appPhase = {
+      name: 'hotseatShipSelect',
+      session: nextSession,
+      selectingSideIds: [loserId as PlayerSide],
+      message: `${getSideName(loserId, 'hotseat')} lost that ship. Pick a new one to challenge the winner.`,
     };
   } else {
     appPhase = { name: 'roundResult', session: nextSession, winnerId, loserId };
@@ -1888,9 +2548,17 @@ function resolveLocalMutualDestruction(session: BattleSession): void {
   if (!playerAlive && !aiAlive) {
     appPhase = { name: 'finalResult', title: 'Draw', detail: 'Both fleets were destroyed.' };
   } else if (!playerAlive) {
-    appPhase = { name: 'finalResult', title: 'AI wins', detail: 'Both ships were destroyed, and you have no ships remaining.' };
+    appPhase =
+      session.mode === 'hotseat'
+        ? { name: 'finalResult', title: 'Player 2 wins', detail: 'Both ships were destroyed, and Player 1 has no ships remaining.' }
+        : { name: 'finalResult', title: 'AI wins', detail: 'Both ships were destroyed, and you have no ships remaining.' };
   } else if (!aiAlive) {
-    appPhase = { name: 'finalResult', title: 'Player wins', detail: 'Both ships were destroyed, and the AI has no ships remaining.' };
+    appPhase =
+      session.mode === 'hotseat'
+        ? { name: 'finalResult', title: 'Player 1 wins', detail: 'Both ships were destroyed, and Player 2 has no ships remaining.' }
+        : { name: 'finalResult', title: 'Player wins', detail: 'Both ships were destroyed, and the AI has no ships remaining.' };
+  } else if (session.mode === 'hotseat') {
+    appPhase = { name: 'hotseatShipSelect', session: nextSession, selectingSideIds: [0, 1], message: 'Both ships were destroyed. Pick new ships.' };
   } else {
     appPhase = { name: 'shipSelect', session: nextSession, message: 'Both ships were destroyed. Pick a new ship.' };
   }
@@ -1900,6 +2568,17 @@ function resolveLocalMutualDestruction(session: BattleSession): void {
 
 function continueAfterRound(): void {
   if (appPhase.name !== 'roundResult') {
+    return;
+  }
+
+  if (appPhase.session.mode === 'hotseat') {
+    appPhase = {
+      name: 'hotseatShipSelect',
+      session: appPhase.session,
+      selectingSideIds: [appPhase.loserId as PlayerSide],
+      message: `${getSideName(appPhase.loserId, 'hotseat')} lost that ship. Pick a new one to challenge the winner.`,
+    };
+    renderMenu();
     return;
   }
 
@@ -1928,10 +2607,31 @@ function startAiDemoRound(round: number): void {
   currentLoadout = [chooseRandomCatalogShip(), chooseRandomCatalogShip()];
   renderer.setShipLoadout(currentLoadout);
   renderHud(currentLoadout);
-  state = createInitialState(Date.now() >>> 0, currentLoadout);
+  state = createInitialState(Date.now() >>> 0, currentLoadout, getGameplaySettings());
   appPhase = { name: 'aiDemo', round };
   log(`Attract Mode round ${round}: ${getShipCatalogEntry(currentLoadout[0]).name} vs ${getShipCatalogEntry(currentLoadout[1]).name}`);
   renderMenu();
+}
+
+function debugKillShip(sideId: PlayerSide): void {
+  if (appPhase.name !== 'fighting' && appPhase.name !== 'hotseatFighting' && appPhase.name !== 'aiDemo') {
+    return;
+  }
+
+  const targetShip = state.ships[sideId];
+  if (!targetShip?.alive || state.winnerId !== null) {
+    return;
+  }
+
+  const ships = state.ships.map((ship) => (ship.id === sideId ? { ...ship, crew: 0, alive: false } : ship));
+  const living = ships.filter((ship) => ship.alive);
+  const winnerId = living.length === 1 ? living[0].id : null;
+  state = {
+    ...state,
+    ships,
+    winnerId,
+  };
+  log(`Debug killed P${sideId + 1} ship.`);
 }
 
 function isAiDemoRoundComplete(nextState: GameState): boolean {
@@ -2329,11 +3029,12 @@ function startNetworkMatchWhenReady(role: ConnectionRole, budget: number, lobbyI
   const seed = Date.now() >>> 0;
   renderer.setShipLoadout(currentLoadout);
   renderHud(currentLoadout);
-  state = createInitialState(seed, currentLoadout);
+  state = createInitialState(seed, currentLoadout, getGameplaySettings());
   networkMatch = new NetworkMatchSession('host', {
     roundId: networkAiRound,
     seed,
     loadout: currentLoadout,
+    gameplay: getGameplaySettings(),
     aiDemo: aiHost,
     readyImmediately: true,
   });
@@ -2520,7 +3221,7 @@ function updateArenaHint(): void {
 }
 
 function getArenaHintText(): string | null {
-  if (appPhase.name === 'aiDemo' || appPhase.name === 'fighting' || appPhase.name === 'networkFight') {
+  if (appPhase.name === 'aiDemo' || appPhase.name === 'fighting' || appPhase.name === 'hotseatFighting' || appPhase.name === 'networkFight') {
     return 'ESC for menu';
   }
 
@@ -2583,7 +3284,7 @@ function quitToMainMenu(): void {
   cleanupHostLobbyIfOwned();
   closePeer();
   currentLoadout = DEFAULT_MATCH_SHIPS;
-  state = createInitialState(undefined, currentLoadout);
+  state = createInitialState(undefined, currentLoadout, getGameplaySettings());
   renderer.setShipLoadout(currentLoadout);
   renderHud(currentLoadout);
   appPhase = { name: 'mainMenu' };
@@ -2614,10 +3315,14 @@ function leaveMatch(): void {
 function goBack(): void {
   switch (appPhase.name) {
     case 'singleBudget':
+    case 'hotseatBudget':
       appPhase = { name: 'mainMenu' };
       break;
     case 'fleetBuild':
       appPhase = { name: 'singleBudget' };
+      break;
+    case 'hotseatFleetBuild':
+      appPhase = { name: 'hotseatBudget' };
       break;
     case 'multiplayerMenu':
       appPhase = { name: 'mainMenu' };
@@ -2693,6 +3398,10 @@ function formatPhaseStatus(): string {
     case 'fleetBuild':
     case 'shipSelect':
       return 'Single player setup';
+    case 'hotseatBudget':
+    case 'hotseatFleetBuild':
+    case 'hotseatShipSelect':
+      return 'Hotseat setup';
     case 'roundResult':
     case 'finalResult':
     case 'networkResult':
@@ -2704,6 +3413,7 @@ function formatPhaseStatus(): string {
     case 'networkFleetBuild':
       return 'Multiplayer setup';
     case 'fighting':
+    case 'hotseatFighting':
     case 'aiDemo':
     case 'networkFight':
       return 'Match active';
@@ -2711,7 +3421,28 @@ function formatPhaseStatus(): string {
 }
 
 function isCombatPhase(): boolean {
-  return appPhase.name === 'fighting' || appPhase.name === 'networkFight' || appPhase.name === 'aiDemo';
+  return appPhase.name === 'fighting' || appPhase.name === 'hotseatFighting' || appPhase.name === 'networkFight' || appPhase.name === 'aiDemo';
+}
+
+function syncCombatMusic(combatPhase: boolean = isCombatPhase()): void {
+  if (combatPhase) {
+    gameAudio.startCombatMusic();
+    return;
+  }
+
+  gameAudio.stopCombatMusic();
+}
+
+function syncAudioControls(): void {
+  const label = getAudioToggleLabel();
+  pauseAudioButton.textContent = label;
+  for (const button of menuOverlay.querySelectorAll<HTMLButtonElement>('[data-audio-toggle]')) {
+    button.textContent = label;
+  }
+}
+
+function getAudioToggleLabel(): string {
+  return gameAudio.isMuted() ? 'Unmute Audio' : 'Mute Audio';
 }
 
 function clearCanvas(): void {
@@ -2853,6 +3584,7 @@ function trackDamage(state: GameState): void {
   }
 
   const previousState = previous.state;
+  trackAudioEvents(previousState, state);
   const previousProjectiles = new Map(previousState.projectiles.map((projectile) => [projectile.id, projectile]));
   const currentProjectileIds = new Set(state.projectiles.map((projectile) => projectile.id));
 
@@ -2919,6 +3651,64 @@ function trackDamage(state: GameState): void {
   }
 
   damageTrackerSnapshot = { frame: state.frame, state };
+}
+
+function trackAudioEvents(previousState: GameState, currentState: GameState): void {
+  trackWeaponAudioEvents(previousState, currentState);
+  trackDamageAudioEvents(previousState, currentState);
+}
+
+function trackWeaponAudioEvents(previousState: GameState, currentState: GameState): void {
+  currentState.ships.forEach((ship, index) => {
+    const previousShip = previousState.ships[index];
+    if (!previousShip || !ship.alive) {
+      return;
+    }
+
+    const sfx = shipSfx[ship.shipId];
+    if (didPrimaryFire(previousShip, ship)) {
+      gameAudio.playSfx(sfx.primary);
+    }
+    if (didSecondaryFire(previousShip, ship)) {
+      gameAudio.playSfx(sfx.secondary);
+    }
+  });
+}
+
+function trackDamageAudioEvents(previousState: GameState, currentState: GameState): void {
+  let stoppedMusic = false;
+  currentState.ships.forEach((ship, index) => {
+    const previousShip = previousState.ships[index];
+    if (!previousShip) {
+      return;
+    }
+
+    if (ship.crew < previousShip.crew) {
+      gameAudio.playSfx('SOUND_HIT');
+    }
+    if (previousShip.alive && !ship.alive) {
+      gameAudio.playSfx('SOUND_DIE');
+      stoppedMusic = true;
+    }
+  });
+
+  if (stoppedMusic) {
+    gameAudio.stopCombatMusic();
+  }
+}
+
+function didPrimaryFire(previousShip: ShipState, ship: ShipState): boolean {
+  const expectedCooldown = Math.max(0, previousShip.primaryCooldown - 1);
+  return ship.primaryCooldown > expectedCooldown;
+}
+
+function didSecondaryFire(previousShip: ShipState, ship: ShipState): boolean {
+  const expectedCooldown = Math.max(0, previousShip.secondaryCooldown - 1);
+  if (ship.secondaryCooldown <= expectedCooldown) {
+    return false;
+  }
+
+  return !(ship.shipId === 'cannonade' && previousShip.secondaryCooldown > 0 && ship.secondaryCooldown === 1);
 }
 
 function logBattleStart(state: GameState): void {
@@ -3021,8 +3811,61 @@ function hasLivingShips(fleet: readonly FleetShip[]): boolean {
   return fleet.some((ship) => ship.alive);
 }
 
-function getSideName(sideId: number): string {
+function getSideName(sideId: number, mode: BattleSession['mode'] = 'single'): string {
+  if (mode === 'hotseat') {
+    return sideId === 0 ? 'Player 1' : 'Player 2';
+  }
+
   return sideId === 0 ? 'Player' : 'AI';
+}
+
+function getEditableFleet(sideId: PlayerSide): readonly FleetShip[] | null {
+  if (appPhase.name === 'hotseatFleetBuild') {
+    return appPhase.ready[sideId] ? null : appPhase.fleets[sideId];
+  }
+
+  if ((appPhase.name === 'fleetBuild' || appPhase.name === 'networkFleetBuild') && sideId === 0) {
+    return appPhase.fleet;
+  }
+
+  return null;
+}
+
+function getFleetBuilderPickingSlotIndex(sideId: PlayerSide): number | null {
+  if (appPhase.name !== 'hotseatFleetBuild') {
+    return null;
+  }
+
+  const slotIndex = fleetBuilderPickingSlotIndices[sideId];
+  return slotIndex !== null && slotIndex === appPhase.fleets[sideId].length && appPhase.fleets[sideId].length < MAX_FLEET_SLOTS ? slotIndex : null;
+}
+
+function updateFleetForSide(
+  fleets: readonly [readonly FleetShip[], readonly FleetShip[]],
+  sideId: PlayerSide,
+  fleet: readonly FleetShip[],
+): readonly [readonly FleetShip[], readonly FleetShip[]] {
+  return sideId === 0 ? [fleet, fleets[1]] : [fleets[0], fleet];
+}
+
+function updateReadyForSide(ready: readonly [boolean, boolean], sideId: PlayerSide, value: boolean): readonly [boolean, boolean] {
+  return sideId === 0 ? [value, ready[1]] : [ready[0], value];
+}
+
+function getSidesNeedingSelection(session: BattleSession): readonly PlayerSide[] {
+  return ([0, 1] as const).filter((sideId) => hasLivingShips(session.fleets[sideId]) && getSelectedFleetShip(session, sideId) === null);
+}
+
+function isShipSelectSideActive(sideId: PlayerSide): boolean {
+  if (appPhase.name === 'shipSelect') {
+    return sideId === 0;
+  }
+
+  return appPhase.name === 'hotseatShipSelect' && appPhase.selectingSideIds.includes(sideId);
+}
+
+function getDefaultShipSelectSide(): PlayerSide {
+  return appPhase.name === 'hotseatShipSelect' ? (appPhase.selectingSideIds[0] ?? 0) : 0;
 }
 
 function getStandardMenuLobbies(): readonly LobbyRecord[] {
@@ -3148,6 +3991,15 @@ function readFleetSlotIndex(button: HTMLButtonElement): number {
   }
 
   return index;
+}
+
+function readFleetSide(button: HTMLButtonElement): PlayerSide {
+  const side = Number(button.dataset.fleetSide ?? 0);
+  if (side !== 0 && side !== 1) {
+    throw new Error(`Invalid fleet side: ${button.dataset.fleetSide}`);
+  }
+
+  return side;
 }
 
 function readLobbyId(button: HTMLButtonElement): string {

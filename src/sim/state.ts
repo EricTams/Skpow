@@ -2,9 +2,17 @@ import { fixed, fixedFromInt } from './fixed';
 import { rngSeed } from './rng';
 import { getShipSpec, type ShipId } from './shipSpecs';
 import { angle } from './trig';
-import type { GameState, ShipCustomState, ShipState } from './types';
+import type { GameState, GameplaySettings, ShipCustomState, ShipState } from './types';
 
-export function createInitialState(seed = 0x5eed_2026, loadout: readonly [ShipId, ShipId] = ['frog', 'cannonade']): GameState {
+export const DEFAULT_GAMEPLAY_SETTINGS: GameplaySettings = {
+  gravityDivisor: 1,
+};
+
+export function createInitialState(
+  seed = 0x5eed_2026,
+  loadout: readonly [ShipId, ShipId] = ['frog', 'cannonade'],
+  gameplay: GameplaySettings = DEFAULT_GAMEPLAY_SETTINGS,
+): GameState {
   const arenaSize = fixedFromInt(2900);
   const actors = createInitialActors(loadout);
 
@@ -29,6 +37,7 @@ export function createInitialState(seed = 0x5eed_2026, loadout: readonly [ShipId
     actors,
     projectiles: [],
     effects: [],
+    gameplay,
     rngSeed: rngSeed(seed),
     winnerId: null,
   };

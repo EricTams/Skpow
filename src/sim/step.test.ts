@@ -281,6 +281,16 @@ describe('ship physics', () => {
     expect(Math.abs(fixedToNumber(near.vx))).toBeGreaterThan(Math.abs(fixedToNumber(far.vx)) * 3);
   });
 
+  it('scales planet gravity by the gameplay gravity divisor', () => {
+    const normalState = createInitialState(123);
+    const lowGravityState = createInitialState(123, ['frog', 'cannonade'], { gravityDivisor: 6 });
+
+    const normal = stepGame(withShip(normalState, { x: fixedFromInt(300), y: normalState.planet.y }), [0, 0]).ships[0];
+    const lowGravity = stepGame(withShip(lowGravityState, { x: fixedFromInt(300), y: lowGravityState.planet.y }), [0, 0]).ships[0];
+
+    expect(fixedToNumber(lowGravity.vx)).toBeCloseTo(fixedToNumber(normal.vx) / 6, 3);
+  });
+
   it('lets a ship thrust away from the planet well', () => {
     let state = withShip(createInitialState(123, ['zizlik', 'cannonade']), { x: fixedFromInt(120), y: fixedFromInt(0), angle: angle(0) });
 

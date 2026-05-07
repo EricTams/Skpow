@@ -113,6 +113,10 @@ export interface ArenaState {
   readonly height: Fixed;
 }
 
+export interface GameplaySettings {
+  readonly gravityDivisor: number;
+}
+
 export interface GameState {
   readonly frame: number;
   readonly ships: readonly ShipState[];
@@ -121,6 +125,7 @@ export interface GameState {
   readonly effects: readonly EffectState[];
   readonly planet: PlanetState;
   readonly arena: ArenaState;
+  readonly gameplay: GameplaySettings;
   readonly nextProjectileId: number;
   readonly nextActorId: number;
   readonly nextEffectId: number;

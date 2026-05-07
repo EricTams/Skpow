@@ -188,7 +188,7 @@ describe('network protocol packets', () => {
     const packet = encodeStateCheckpointPacket({ frame: state.frame + 1, hash: hashState(state), state });
 
     expect(() => decodeStateCheckpointPacket(packet)).toThrow('State checkpoint frame does not match its state payload.');
-    expect(() => decodeStateCheckpointPacket(new Uint8Array([6, GameplayPacketType.StateCheckpoint]))).toThrow(
+    expect(() => decodeStateCheckpointPacket(new Uint8Array([7, GameplayPacketType.StateCheckpoint]))).toThrow(
       'State checkpoint packet is missing its state payload.',
     );
   });
@@ -198,6 +198,7 @@ describe('network protocol packets', () => {
       roundId: 2,
       seed: 123,
       loadout: ['frog', 'cannonade'] as const,
+      gameplay: { gravityDivisor: 6 },
       aiDemo: true,
       startFrame: 0,
       hostPlayerIndex: 0 as const,
@@ -224,10 +225,10 @@ describe('network protocol packets', () => {
   });
 
   it('rejects malformed session readiness packets', () => {
-    expect(() => decodeSessionReadyPacket(new Uint8Array([6, GameplayPacketType.SessionReady, 0]))).toThrow(
+    expect(() => decodeSessionReadyPacket(new Uint8Array([7, GameplayPacketType.SessionReady, 0]))).toThrow(
       'Session ready packet must be exactly 2 bytes.',
     );
-    expect(() => decodeSessionReadyAckPacket(new Uint8Array([6, GameplayPacketType.SessionReadyAck, 0]))).toThrow(
+    expect(() => decodeSessionReadyAckPacket(new Uint8Array([7, GameplayPacketType.SessionReadyAck, 0]))).toThrow(
       'Session ready ack packet must be exactly 2 bytes.',
     );
   });
@@ -236,6 +237,6 @@ describe('network protocol packets', () => {
     expect(() => decodeGameplayPacket(new Uint8Array([99, GameplayPacketType.Input]))).toThrow(
       'Unsupported gameplay protocol version',
     );
-    expect(() => decodeGameplayPacket(new Uint8Array([6, 99]))).toThrow('Unknown gameplay packet type');
+    expect(() => decodeGameplayPacket(new Uint8Array([7, 99]))).toThrow('Unknown gameplay packet type');
   });
 });

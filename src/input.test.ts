@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { readGamepadBits } from './input';
+import { readGamepadBits, readLocalInputs } from './input';
 import { InputBits } from './sim/types';
 
 function gamepad(overrides: Partial<Pick<Gamepad, 'axes' | 'buttons'>>): Pick<Gamepad, 'axes' | 'buttons'> {
@@ -15,6 +15,10 @@ function button(pressed: boolean): GamepadButton {
 }
 
 describe('gamepad input mapping', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it('maps left stick and face buttons to ship input bits', () => {
     const input = readGamepadBits(
       gamepad({
@@ -39,5 +43,23 @@ describe('gamepad input mapping', () => {
     expect(input & InputBits.TurnRight).toBe(InputBits.TurnRight);
     expect(input & InputBits.Thrust).toBe(InputBits.Thrust);
     expect(input & InputBits.FireSecondary).toBe(InputBits.FireSecondary);
+  });
+
+  it('keeps gamepad indices separated for local hotseat input', () => {
+    const playerOneButtons = Array.from({ length: 16 }, () => button(false));
+    const playerTwoButtons = Array.from({ length: 16 }, () => button(false));
+    playerOneButtons[0] = button(true);
+    playerTwoButtons[1] = button(true);
+
+    vi.stubGlobal('navigator', {
+      getGamepads: () => [gamepad({ buttons: playerOneButtons }), gamepad({ buttons: playerTwoButtons })],
+    });
+
+    const inputs = readLocalInputs();
+
+    expect(inputs[0] & InputBits.FirePrimary).toBe(InputBits.FirePrimary);
+    expect(inputs[0] & InputBits.FireSecondary).toBe(0);
+    expect(inputs[1] & InputBits.FirePrimary).toBe(0);
+    expect(inputs[1] & InputBits.FireSecondary).toBe(InputBits.FireSecondary);
   });
 });

@@ -1,5 +1,5 @@
 import type { ShipId } from '../sim/shipSpecs';
-import type { GameState, ProjectileState, ShipState } from '../sim/types';
+import type { GameState, GameplaySettings, ProjectileState, ShipState } from '../sim/types';
 
 export interface InputPacket {
   readonly frame: number;
@@ -105,6 +105,7 @@ export interface SessionConfigPacket {
   readonly roundId: number;
   readonly seed: number;
   readonly loadout: readonly [ShipId, ShipId];
+  readonly gameplay: GameplaySettings;
   readonly aiDemo: boolean;
   readonly startFrame: number;
   readonly hostPlayerIndex: 0 | 1;
@@ -115,7 +116,7 @@ export interface SessionReadyPacket {}
 
 export interface SessionReadyAckPacket {}
 
-export const GAMEPLAY_PROTOCOL_VERSION = 6;
+export const GAMEPLAY_PROTOCOL_VERSION = 7;
 const HEADER_LENGTH = 2;
 const STATE_CHECKPOINT_HEADER_LENGTH = 10;
 
@@ -354,6 +355,14 @@ export function decodeSessionConfigPacket(bytes: Uint8Array): SessionConfigPacke
   }
   if (typeof packet.aiDemo !== 'boolean') {
     throw new Error('Session config packet has an invalid AI demo flag.');
+  }
+  if (
+    typeof packet.gameplay !== 'object' ||
+    packet.gameplay === null ||
+    !Number.isInteger(packet.gameplay.gravityDivisor) ||
+    packet.gameplay.gravityDivisor < 1
+  ) {
+    throw new Error('Session config packet has invalid gameplay settings.');
   }
   if (!Array.isArray(packet.loadout) || packet.loadout.length !== 2 || !isShipId(packet.loadout[0]) || !isShipId(packet.loadout[1])) {
     throw new Error('Session config packet has an invalid loadout.');

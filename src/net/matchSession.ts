@@ -1,6 +1,6 @@
 import { createInitialState } from '../sim/state';
 import type { ShipId } from '../sim/shipSpecs';
-import { InputBits, type GameState } from '../sim/types';
+import { InputBits, type GameState, type GameplaySettings } from '../sim/types';
 import type { Fixed } from '../sim/fixed';
 import type { Angle } from '../sim/trig';
 import { isKronBeamHitting, isNurtipDetonationHitting, NURTIP_DETONATION_DAMAGE } from '../sim/step';
@@ -120,6 +120,7 @@ export class NetworkMatchSession {
       readonly roundId?: number;
       readonly seed?: number;
       readonly loadout?: readonly [ShipId, ShipId];
+      readonly gameplay?: GameplaySettings;
       readonly aiDemo?: boolean;
       readonly readyImmediately?: boolean;
     } = {},
@@ -132,6 +133,7 @@ export class NetworkMatchSession {
         roundId: options.roundId ?? 0,
         seed: options.seed ?? DEFAULT_MATCH_SEED,
         loadout: options.loadout ?? ['frog', 'cannonade'],
+        gameplay: options.gameplay ?? { gravityDivisor: 1 },
         aiDemo: options.aiDemo ?? false,
         startFrame: 0,
         hostPlayerIndex: 0,
@@ -285,7 +287,7 @@ export class NetworkMatchSession {
     this.localPlayerIndex = this.role === 'host' ? config.hostPlayerIndex : config.joinerPlayerIndex;
     this.activeAiDemo = config.aiDemo;
     this.activeRoundId = config.roundId;
-    this.ownerSession = new OwnerAuthoritySession(createInitialState(config.seed, config.loadout), this.localPlayerIndex);
+    this.ownerSession = new OwnerAuthoritySession(createInitialState(config.seed, config.loadout, config.gameplay), this.localPlayerIndex);
     this.activeSessionKey = getSessionConfigKey(config);
     this.lastOwnerStateFrame = null;
     this.lastProjectileSpawnFrame = null;
@@ -961,7 +963,7 @@ function isPlayerIndex(value: number): value is PlayerIndex {
 }
 
 function getSessionConfigKey(config: SessionConfigPacket): string {
-  return `${config.roundId}:${config.seed}:${config.loadout[0]}:${config.loadout[1]}:${config.aiDemo}:${config.hostPlayerIndex}:${config.joinerPlayerIndex}`;
+  return `${config.roundId}:${config.seed}:${config.loadout[0]}:${config.loadout[1]}:${config.gameplay.gravityDivisor}:${config.aiDemo}:${config.hostPlayerIndex}:${config.joinerPlayerIndex}`;
 }
 
 function mergeRecoverySnapshots(local: GameState, remote: GameState, localPlayerIndex: PlayerIndex): GameState {
