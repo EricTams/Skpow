@@ -1307,9 +1307,10 @@ function renderFleetPanel(options: {
   const hiddenClass = options.isHidden ? ' fleet-console-hidden' : '';
   const editableClass = options.isEditable ? ' fleet-console-active' : '';
   const pickingClass = options.pickerHtml ? ' fleet-console-picking' : '';
+  const sideClass = options.sideId === 0 ? ' fleet-console-p1' : ' fleet-console-p2';
   const contentClass = options.controlsHtml ? ' fleet-console-content fleet-console-content-controls' : ' fleet-console-content';
   return `
-    <section class="fleet-console${editableClass}${hiddenClass}${pickingClass}" aria-label="${options.label}" ${options.isHidden ? 'aria-hidden="true"' : ''}>
+    <section class="fleet-console${sideClass}${editableClass}${hiddenClass}${pickingClass}" aria-label="${options.label}" ${options.isHidden ? 'aria-hidden="true"' : ''}>
       ${
         options.pickerHtml
           ? `
@@ -1454,22 +1455,24 @@ function handleFleetBuilderKeyboardNav(event: KeyboardEvent): boolean {
     return false;
   }
 
-  const direction = readFleetBuilderKeyboardDirection(event.code);
-  if (direction) {
+  const directionInput = readFleetBuilderKeyboardDirectionInput(event.code);
+  if (directionInput) {
     event.preventDefault();
-    focusFleetBuilderNav(direction);
+    focusFleetBuilderNav(directionInput.direction, directionInput.sideId);
     return true;
   }
 
-  if (event.code === 'Space' || event.code === 'Enter' || event.code === 'NumpadEnter') {
+  const activateSide = readFleetBuilderKeyboardActivateSide(event.code);
+  if (activateSide !== null) {
     event.preventDefault();
-    activateFleetBuilderFocusedControl();
+    activateFleetBuilderFocusedControl(activateSide);
     return true;
   }
 
-  if (event.code === 'KeyE' || event.code === 'KeyO' || event.code === 'Escape') {
+  const cancelSide = readFleetBuilderKeyboardCancelSide(event.code);
+  if (cancelSide !== null) {
     event.preventDefault();
-    activateFleetBuilderBackControl();
+    activateFleetBuilderBackControl(cancelSide);
     return true;
   }
 
@@ -1492,6 +1495,13 @@ function handleShipSelectKeyboardNav(event: KeyboardEvent): boolean {
   if (activateSide !== null) {
     event.preventDefault();
     activateShipSelectFocusedControl(activateSide);
+    return true;
+  }
+
+  const cancelSide = readShipSelectKeyboardCancelSide(event.code);
+  if (cancelSide !== null) {
+    event.preventDefault();
+    cancelShipSelectForSide(cancelSide);
     return true;
   }
 
@@ -1528,6 +1538,7 @@ function updateShipSelectGamepadNavForSide(sideId: PlayerSide): void {
   if (!isShipSelectSideActive(sideId)) {
     previousShipSelectInputs[sideId] = 0;
     shipSelectNavRepeatFrames[sideId] = 0;
+    clearPlayerInteractionIndicator('shipSelect', sideId);
     return;
   }
 
@@ -1548,6 +1559,8 @@ function updateShipSelectGamepadNavForSide(sideId: PlayerSide): void {
 
   if ((pressed & MenuInputBits.Primary) !== 0) {
     activateShipSelectFocusedControl(sideId);
+  } else if ((pressed & MenuInputBits.Secondary) !== 0) {
+    cancelShipSelectForSide(sideId);
   }
 
   previousShipSelectInputs[sideId] = input;
@@ -1597,6 +1610,54 @@ function readFleetBuilderKeyboardDirection(code: string): FleetBuilderNavDirecti
   }
 }
 
+function readFleetBuilderKeyboardDirectionInput(code: string): { readonly sideId: PlayerSide; readonly direction: FleetBuilderNavDirection } | null {
+  const p1Direction = readFleetBuilderKeyboardDirection(code);
+  if (p1Direction) {
+    return { sideId: 0, direction: p1Direction };
+  }
+
+  if (appPhase.name !== 'hotseatFleetBuild') {
+    return null;
+  }
+
+  switch (code) {
+    case 'KeyI':
+      return { sideId: 1, direction: 'up' };
+    case 'KeyK':
+      return { sideId: 1, direction: 'down' };
+    case 'KeyJ':
+      return { sideId: 1, direction: 'left' };
+    case 'KeyL':
+      return { sideId: 1, direction: 'right' };
+    default:
+      return null;
+  }
+}
+
+function readFleetBuilderKeyboardActivateSide(code: string): PlayerSide | null {
+  if (code === 'Space') {
+    return 0;
+  }
+
+  if (code === 'Enter' || code === 'NumpadEnter') {
+    return appPhase.name === 'hotseatFleetBuild' ? 1 : 0;
+  }
+
+  return null;
+}
+
+function readFleetBuilderKeyboardCancelSide(code: string): PlayerSide | null {
+  if (code === 'KeyE' || code === 'Escape') {
+    return 0;
+  }
+
+  if (code === 'KeyO' && appPhase.name === 'hotseatFleetBuild') {
+    return 1;
+  }
+
+  return null;
+}
+
 function readShipSelectKeyboardDirection(code: string): { readonly sideId: PlayerSide; readonly direction: FleetBuilderNavDirection } | null {
   const p1Direction = readFleetBuilderKeyboardDirection(code);
   if (p1Direction) {
@@ -1627,11 +1688,19 @@ function readShipSelectKeyboardActivateSide(code: string): PlayerSide | null {
   }
 
   if (code === 'Enter' || code === 'NumpadEnter') {
-    const active = getActiveShipSelectButton(1) ?? getActiveShipSelectButton(0);
-    if (active) {
-      return readFleetSide(active);
-    }
     return appPhase.name === 'hotseatShipSelect' ? 1 : 0;
+  }
+
+  return null;
+}
+
+function readShipSelectKeyboardCancelSide(code: string): PlayerSide | null {
+  if (code === 'KeyE' || code === 'Escape') {
+    return 0;
+  }
+
+  if (code === 'KeyO' && appPhase.name === 'hotseatShipSelect') {
+    return 1;
   }
 
   return null;
@@ -1658,6 +1727,11 @@ function queueFleetBuilderFocusRestore(): void {
   window.setTimeout(() => {
     if (isFleetBuilderPhase()) {
       restoreFleetBuilderFocus(0);
+      if (appPhase.name === 'hotseatFleetBuild') {
+        restoreFleetBuilderFocus(1);
+      } else {
+        clearPlayerInteractionIndicator('fleet', 1);
+      }
     }
   }, 0);
 }
@@ -1690,7 +1764,18 @@ function restoreFleetBuilderFocus(sideId: PlayerSide): HTMLButtonElement | null 
 function queueShipSelectFocusRestore(): void {
   window.setTimeout(() => {
     if (isShipSelectPhase()) {
-      restoreShipSelectFocus(getDefaultShipSelectSide());
+      if (appPhase.name === 'hotseatShipSelect') {
+        for (const sideId of [0, 1] as const) {
+          if (isShipSelectSideActive(sideId)) {
+            restoreShipSelectFocus(sideId);
+          } else {
+            clearPlayerInteractionIndicator('shipSelect', sideId);
+          }
+        }
+      } else {
+        restoreShipSelectFocus(getDefaultShipSelectSide());
+        clearPlayerInteractionIndicator('shipSelect', 1);
+      }
     }
   }, 0);
 }
@@ -1814,6 +1899,26 @@ function activateShipSelectFocusedControl(sideId: PlayerSide = 0): void {
   button?.click();
 }
 
+function cancelShipSelectForSide(sideId: PlayerSide): void {
+  if (appPhase.name !== 'hotseatShipSelect' || appPhase.selectingSideIds.includes(sideId)) {
+    return;
+  }
+
+  if (appPhase.session.selectedShipUids[sideId] === null) {
+    return;
+  }
+
+  const selectingSideIds = [...appPhase.selectingSideIds, sideId].sort((left, right) => left - right) as PlayerSide[];
+  appPhase = {
+    ...appPhase,
+    session: withoutSelectedShip(appPhase.session, sideId),
+    selectingSideIds,
+    message: `${getSideName(sideId, 'hotseat')} canceled their pick. Choose a ship.`,
+  };
+  shipSelectNavTargets[sideId] = null;
+  renderMenu();
+}
+
 function activateFleetBuilderBackControl(sideId: PlayerSide = 0): void {
   if (fleetBuilderPickingSlotIndices[sideId] !== null) {
     cancelFleetBuilderShipPicker(sideId);
@@ -1877,6 +1982,7 @@ function rememberFleetBuilderNavTarget(button: HTMLButtonElement, sideId: Player
     nav: button.dataset.fleetNav ?? 'catalog',
     index: Number.isFinite(index) ? index : 0,
   };
+  updatePlayerInteractionIndicator('fleet', sideId, button);
 }
 
 function rememberShipSelectNavTarget(button: HTMLButtonElement, sideId: PlayerSide): void {
@@ -1885,6 +1991,21 @@ function rememberShipSelectNavTarget(button: HTMLButtonElement, sideId: PlayerSi
     nav: button.dataset.shipSelectNav ?? 'slot',
     index: Number.isFinite(index) ? index : 0,
   };
+  updatePlayerInteractionIndicator('shipSelect', sideId, button);
+}
+
+function updatePlayerInteractionIndicator(kind: 'fleet' | 'shipSelect', sideId: PlayerSide, button: HTMLButtonElement): void {
+  clearPlayerInteractionIndicator(kind, sideId);
+  button.classList.add('player-interaction-active', sideId === 0 ? 'player-interaction-p1' : 'player-interaction-p2');
+  button.dataset.playerIndicator = sideId === 0 ? 'P1' : 'P2';
+}
+
+function clearPlayerInteractionIndicator(kind: 'fleet' | 'shipSelect', sideId: PlayerSide): void {
+  const selector = kind === 'fleet' ? `button[data-fleet-nav][data-fleet-side="${sideId}"]` : `button[data-ship-select-nav][data-fleet-side="${sideId}"]`;
+  menuOverlay.querySelectorAll<HTMLButtonElement>(selector).forEach((button) => {
+    button.classList.remove('player-interaction-active', 'player-interaction-p1', 'player-interaction-p2');
+    delete button.dataset.playerIndicator;
+  });
 }
 
 function getRectCenter(rect: DOMRect): { readonly x: number; readonly y: number } {
@@ -2002,7 +2123,7 @@ function renderHotseatShipSelectPanel(session: BattleSession, sideId: PlayerSide
   const selectedShip = getSelectedFleetShip(session, sideId);
   const status = isSelecting ? 'Choose a ship' : selectedShip ? `${getShipCatalogEntry(selectedShip.catalogId).name} locked in` : 'Waiting';
   return `
-    <section class="hotseat-select-panel${isSelecting ? '' : ' hotseat-select-panel-locked'}" aria-label="${getSideName(sideId, 'hotseat')} ship selection">
+    <section class="hotseat-select-panel hotseat-select-panel-p${sideId + 1}${isSelecting ? '' : ' hotseat-select-panel-locked'}" aria-label="${getSideName(sideId, 'hotseat')} ship selection">
       <h3>${getSideName(sideId, 'hotseat')}</h3>
       <p class="hotseat-select-status">${status}</p>
       ${renderShipSelectFleetGrid(session.fleets[sideId], sideId, isSelecting, selectedShip?.uid ?? null)}
@@ -2044,7 +2165,7 @@ function renderShipSelectFleetSlot(
   const ship = getShipCatalogEntry(fleetShip.catalogId);
   const defeatedClass = fleetShip.alive ? '' : ' ship-select-slot-defeated';
   const defeatedOverlay = fleetShip.alive ? '' : '<span class="ship-select-defeated-mark" aria-hidden="true">X</span>';
-  const selectedClass = fleetShip.uid === selectedUid ? ' ship-select-slot-selected' : '';
+  const selectedClass = fleetShip.uid === selectedUid ? ` ship-select-slot-selected ship-select-slot-selected-p${sideId + 1}` : '';
   const selectedOverlay = fleetShip.uid === selectedUid ? '<span class="ship-select-selected-mark" aria-hidden="true">Locked</span>' : '';
   const label = fleetShip.alive ? `Fight with ${ship.name} from slot ${index + 1}` : `${ship.name} in slot ${index + 1} was defeated`;
   const content = `
@@ -3794,6 +3915,13 @@ function withSelectedShip(session: BattleSession, sideId: 0 | 1, uid: string): B
   return {
     ...session,
     selectedShipUids: sideId === 0 ? [uid, session.selectedShipUids[1]] : [session.selectedShipUids[0], uid],
+  };
+}
+
+function withoutSelectedShip(session: BattleSession, sideId: PlayerSide): BattleSession {
+  return {
+    ...session,
+    selectedShipUids: sideId === 0 ? [null, session.selectedShipUids[1]] : [session.selectedShipUids[0], null],
   };
 }
 

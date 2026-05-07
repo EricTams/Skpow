@@ -76,6 +76,53 @@ button[data-ship-select-nav]:focus-visible {
   box-shadow: 0 0 0 4px rgba(248, 216, 120, 0.18);
 }
 
+button.player-interaction-active {
+  --player-indicator-color: #79c0ff;
+  --player-indicator-glow: rgba(121, 192, 255, 0.52);
+  --player-indicator-fill: rgba(121, 192, 255, 0.24);
+  position: relative;
+  border-color: var(--player-indicator-color);
+  background: linear-gradient(180deg, var(--player-indicator-fill), rgba(5, 8, 70, 0.86));
+  outline: 4px solid var(--player-indicator-color);
+  outline-offset: 2px;
+  box-shadow:
+    0 0 0 6px var(--player-indicator-glow),
+    inset 0 0 20px var(--player-indicator-glow);
+}
+
+button[data-fleet-nav].player-interaction-active:focus-visible,
+button[data-ship-select-nav].player-interaction-active:focus-visible {
+  outline: 4px solid var(--player-indicator-color);
+  outline-offset: 2px;
+  box-shadow:
+    0 0 0 6px var(--player-indicator-glow),
+    inset 0 0 20px var(--player-indicator-glow);
+}
+
+button.player-interaction-p2 {
+  --player-indicator-color: #ff9f43;
+  --player-indicator-glow: rgba(255, 159, 67, 0.52);
+  --player-indicator-fill: rgba(255, 159, 67, 0.24);
+}
+
+button.player-interaction-active::before {
+  position: absolute;
+  top: 0.2rem;
+  left: 0.2rem;
+  z-index: 6;
+  content: attr(data-player-indicator);
+  border: 1px solid var(--player-indicator-color);
+  border-radius: 999px;
+  background: rgba(2, 4, 13, 0.86);
+  color: var(--player-indicator-color);
+  font-size: 0.58rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  padding: 0.16rem 0.28rem;
+  pointer-events: none;
+}
+
 .legacy-screen {
   display: grid;
   grid-template-columns: 280fr 720fr 280fr;
@@ -536,12 +583,20 @@ button[data-ship-select-nav]:focus-visible {
 }
 
 .fleet-console {
+  --fleet-side-color: #79c0ff;
+  --fleet-side-glow: rgba(121, 192, 255, 0.22);
   --fleet-roster-height: calc((4.35rem * 2) + 0.25rem);
   padding: 0.55rem;
 }
 
+.fleet-console-p2 {
+  --fleet-side-color: #ff9f43;
+  --fleet-side-glow: rgba(255, 159, 67, 0.22);
+}
+
 .fleet-console-active {
-  border-color: rgba(248, 216, 120, 0.42);
+  border-color: var(--fleet-side-color);
+  box-shadow: inset 0 0 24px var(--fleet-side-glow);
 }
 
 .fleet-console-hidden {
@@ -634,6 +689,15 @@ button.fleet-slot {
   border-color: #f8d878;
   filter: brightness(1.15);
   transform: translateY(-1px);
+}
+
+.fleet-slot-filled.player-interaction-active:hover,
+.fleet-slot-filled.player-interaction-active:focus-visible,
+.fleet-slot-open.player-interaction-active:hover,
+.fleet-slot-open.player-interaction-active:focus-visible,
+.fleet-picker-ship.player-interaction-active:hover,
+.fleet-picker-ship.player-interaction-active:focus-visible {
+  border-color: var(--player-indicator-color);
 }
 
 .fleet-slot-open {
@@ -815,6 +879,8 @@ button.fleet-slot {
 }
 
 .hotseat-select-panel {
+  --hotseat-panel-color: #79c0ff;
+  --hotseat-panel-glow: rgba(121, 192, 255, 0.2);
   min-width: 0;
   min-height: 0;
   display: grid;
@@ -825,8 +891,14 @@ button.fleet-slot {
   padding: 1rem;
 }
 
+.hotseat-select-panel-p2 {
+  --hotseat-panel-color: #ff9f43;
+  --hotseat-panel-glow: rgba(255, 159, 67, 0.2);
+}
+
 .hotseat-select-panel-locked {
-  border-color: rgba(248, 216, 120, 0.42);
+  border-color: var(--hotseat-panel-color);
+  box-shadow: inset 0 0 24px var(--hotseat-panel-glow);
 }
 
 .hotseat-select-panel > h3 {
@@ -880,8 +952,15 @@ button.fleet-slot {
 }
 
 .ship-select-slot-selected {
-  border-color: rgba(248, 216, 120, 0.92);
-  box-shadow: inset 0 0 22px rgba(248, 216, 120, 0.2);
+  --ship-select-selected-color: #79c0ff;
+  --ship-select-selected-glow: rgba(121, 192, 255, 0.28);
+  border-color: var(--ship-select-selected-color);
+  box-shadow: inset 0 0 22px var(--ship-select-selected-glow);
+}
+
+.ship-select-slot-selected-p2 {
+  --ship-select-selected-color: #ff9f43;
+  --ship-select-selected-glow: rgba(255, 159, 67, 0.28);
 }
 
 .ship-select-selected-mark {
@@ -889,9 +968,9 @@ button.fleet-slot {
   right: 0.3rem;
   bottom: 0.3rem;
   z-index: 3;
-  border: 1px solid rgba(248, 216, 120, 0.86);
+  border: 1px solid var(--ship-select-selected-color);
   background: rgba(2, 4, 13, 0.82);
-  color: #f8d878;
+  color: var(--ship-select-selected-color);
   font-size: 0.58rem;
   font-weight: 900;
   letter-spacing: 0.1em;
@@ -921,14 +1000,14 @@ button.fleet-slot {
   gap: 0.4rem;
   height: 100%;
   padding: 0.35rem;
-  border: 1px solid rgba(248, 216, 120, 0.72);
+  border: 1px solid var(--fleet-side-color);
   border-radius: 12px;
   background:
     linear-gradient(180deg, rgba(13, 17, 23, 0.96), rgba(2, 4, 13, 0.98)),
     var(--fleet-builder-space-alt) center / cover;
   box-shadow:
     0 18px 54px rgba(0, 0, 0, 0.6),
-    inset 0 0 36px rgba(248, 216, 120, 0.1);
+    inset 0 0 36px var(--fleet-side-glow);
 }
 
 .fleet-catalog {
@@ -1014,6 +1093,11 @@ button.fleet-slot {
 .fleet-picker-ship:focus-visible {
   border-color: #f8d878;
   filter: brightness(1.12);
+}
+
+.fleet-picker-ship.player-interaction-active:hover,
+.fleet-picker-ship.player-interaction-active:focus-visible {
+  border-color: var(--player-indicator-color);
 }
 
 .legacy-hud {
