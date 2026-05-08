@@ -118,6 +118,7 @@ export interface SessionReadyAckPacket {}
 
 export const GAMEPLAY_PROTOCOL_VERSION = 7;
 const HEADER_LENGTH = 2;
+const ALLOWED_SPEED_MULTIPLIERS = new Set([1, 1.5, 2]);
 const STATE_CHECKPOINT_HEADER_LENGTH = 10;
 
 export enum GameplayPacketType {
@@ -360,7 +361,8 @@ export function decodeSessionConfigPacket(bytes: Uint8Array): SessionConfigPacke
     typeof packet.gameplay !== 'object' ||
     packet.gameplay === null ||
     !Number.isInteger(packet.gameplay.gravityDivisor) ||
-    packet.gameplay.gravityDivisor < 1
+    packet.gameplay.gravityDivisor < 1 ||
+    !ALLOWED_SPEED_MULTIPLIERS.has(packet.gameplay.speedMultiplier)
   ) {
     throw new Error('Session config packet has invalid gameplay settings.');
   }

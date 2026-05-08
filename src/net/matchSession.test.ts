@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { InputBits, type ProjectileState } from '../sim/types';
+import { InputBits, type GameplaySettings, type ProjectileState } from '../sim/types';
 import type { ShipId } from '../sim/shipSpecs';
 import { fixed, fixedFromInt } from '../sim/fixed';
 import { angle } from '../sim/trig';
@@ -28,7 +28,7 @@ describe('network match session', () => {
       roundId: 0,
       seed: 123,
       loadout: ['frog', 'cannonade'],
-      gameplay: { gravityDivisor: 1 },
+      gameplay: { gravityDivisor: 1, speedMultiplier: 1 },
       aiDemo: false,
       startFrame: 0,
       hostPlayerIndex: 0,
@@ -96,6 +96,17 @@ describe('network match session', () => {
     expect(joiner.ready).toBe(false);
     expect(joiner.currentState?.frame).toBe(0);
     expect(joiner.currentState?.ships.map((ship) => ship.shipId)).toEqual(['gooj', 'kron']);
+    expect(joiner.takeOutgoingPackets().map((packet) => decodeGameplayPacket(packet).type)).toEqual([GameplayPacketType.SessionReady]);
+  });
+
+  it('treats speed multiplier changes as a new session config', () => {
+    const { joiner } = connectSessions({ seed: 123, gameplay: { gravityDivisor: 1, speedMultiplier: 1 } });
+    const nextHost = new NetworkMatchSession('host', { seed: 123, gameplay: { gravityDivisor: 1, speedMultiplier: 2 } });
+
+    deliverPackets(joiner, nextHost.takeOutgoingPackets());
+
+    expect(joiner.ready).toBe(false);
+    expect(joiner.currentState?.gameplay.speedMultiplier).toBe(2);
     expect(joiner.takeOutgoingPackets().map((packet) => decodeGameplayPacket(packet).type)).toEqual([GameplayPacketType.SessionReady]);
   });
 
@@ -412,7 +423,7 @@ describe('network match session', () => {
         roundId: 0,
         seed: 123,
         loadout: ['frog', 'cannonade'],
-        gameplay: { gravityDivisor: 1 },
+        gameplay: { gravityDivisor: 1, speedMultiplier: 1 },
         aiDemo: false,
         startFrame: 0,
         hostPlayerIndex: 0,
@@ -548,7 +559,7 @@ describe('network match session', () => {
   });
 });
 
-function connectSessions(options: { readonly seed?: number; readonly loadout?: readonly [ShipId, ShipId] } = {}): {
+function connectSessions(options: { readonly seed?: number; readonly loadout?: readonly [ShipId, ShipId]; readonly gameplay?: GameplaySettings } = {}): {
   readonly host: NetworkMatchSession;
   readonly joiner: NetworkMatchSession;
 } {

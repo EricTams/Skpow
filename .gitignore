@@ -11,6 +11,7 @@ coverage/
 # OS/editor noise.
 .DS_Store
 Thumbs.db
+.cursorignore
 
 # Local reference source, not intended for GitHub.
 reference_code/

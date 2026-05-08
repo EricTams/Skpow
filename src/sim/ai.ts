@@ -110,8 +110,10 @@ export function getAiMovementMode(state: GameState, playerId: number): AiMovemen
 }
 
 function getAimSolution(ship: ShipState, enemy: ShipState, state: GameState, leadFrames: number): AimSolution {
-  const enemyX = fixedToNumber(enemy.x) + fixedToNumber(enemy.vx) * leadFrames;
-  const enemyY = fixedToNumber(enemy.y) + fixedToNumber(enemy.vy) * leadFrames;
+  const inheritedVx = ship.freezeFrames === 0 ? fixedToNumber(ship.vx) : 0;
+  const inheritedVy = ship.freezeFrames === 0 ? fixedToNumber(ship.vy) : 0;
+  const enemyX = fixedToNumber(enemy.x) + (fixedToNumber(enemy.vx) - inheritedVx) * leadFrames;
+  const enemyY = fixedToNumber(enemy.y) + (fixedToNumber(enemy.vy) - inheritedVy) * leadFrames;
   const shipX = fixedToNumber(ship.x);
   const shipY = fixedToNumber(ship.y);
   const dx = getWrappedDelta(enemyX - shipX, fixedToNumber(state.arena.width));

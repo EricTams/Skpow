@@ -115,6 +115,7 @@ export interface ArenaState {
 
 export interface GameplaySettings {
   readonly gravityDivisor: number;
+  readonly speedMultiplier: number;
 }
 
 export interface GameState {

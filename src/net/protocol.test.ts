@@ -198,7 +198,7 @@ describe('network protocol packets', () => {
       roundId: 2,
       seed: 123,
       loadout: ['frog', 'cannonade'] as const,
-      gameplay: { gravityDivisor: 6 },
+      gameplay: { gravityDivisor: 6, speedMultiplier: 1.5 },
       aiDemo: true,
       startFrame: 0,
       hostPlayerIndex: 0 as const,

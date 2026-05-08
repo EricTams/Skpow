@@ -12,6 +12,7 @@ export function hashState(state: GameState): number {
   hash = mix(hash, state.planet.y);
   hash = mix(hash, state.planet.radius);
   hash = mix(hash, state.gameplay.gravityDivisor);
+  hash = mix(hash, Math.round(state.gameplay.speedMultiplier * 1000));
   hash = mix(hash, state.winnerId ?? 0xffff_ffff);
 
   for (const ship of state.ships) {

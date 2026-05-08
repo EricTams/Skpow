@@ -35,6 +35,8 @@ const THRUST_CAP_RANGE = fixed(0.94);
 const THRUST_CAP_MAX = fixed(1.8);
 const OVER_MAX_THRUST_DAMPING = fixed(0.98);
 const GRAVITY_SPEED_PRESERVE_MULTIPLIER = fixed(1.8);
+const PROJECTILE_MUZZLE_SPEED_SCALE = fixed(0.8);
+const PROJECTILE_TTL_SCALE = 1.25;
 const PLANET_COLLISION_BOUNCE = fixed(-0.5);
 const FROG_MAX_CHARGE = 8;
 const FROG_CHARGE_INTERVAL = 50;
@@ -420,16 +422,18 @@ function stepShip(
   }
 
   ({ vx, vy } = applyPlanetGravity(vx, vy, x, y, state, input, activeSpec));
+  const speedMultiplier = getGameplaySpeedMultiplierFixed(state);
 
   {
     const turnLeft = (input & InputBits.TurnLeft) !== 0;
     const turnRight = (input & InputBits.TurnRight) !== 0;
+    const turnStep = fixedMul(activeSpec.turnStep, speedMultiplier);
 
     let turnAccumulator = custom.turnAccumulator ?? (0 as Fixed);
     if (turnLeft && !turnRight) {
-      turnAccumulator = (turnAccumulator - activeSpec.turnStep) as Fixed;
+      turnAccumulator = (turnAccumulator - turnStep) as Fixed;
     } else if (turnRight && !turnLeft) {
-      turnAccumulator = (turnAccumulator + activeSpec.turnStep) as Fixed;
+      turnAccumulator = (turnAccumulator + turnStep) as Fixed;
     } else {
       turnAccumulator = 0 as Fixed;
     }
@@ -442,11 +446,12 @@ function stepShip(
     custom = { ...custom, turnAccumulator };
 
     if (activeSpec.cannonTurnStep !== undefined) {
+      const cannonTurnStep = fixedMul(activeSpec.cannonTurnStep, speedMultiplier);
       let cannonTurnAccumulator = custom.cannonTurnAccumulator ?? (0 as Fixed);
       if (turnLeft && !turnRight) {
-        cannonTurnAccumulator = (cannonTurnAccumulator - activeSpec.cannonTurnStep) as Fixed;
+        cannonTurnAccumulator = (cannonTurnAccumulator - cannonTurnStep) as Fixed;
       } else if (turnRight && !turnLeft) {
-        cannonTurnAccumulator = (cannonTurnAccumulator + activeSpec.cannonTurnStep) as Fixed;
+        cannonTurnAccumulator = (cannonTurnAccumulator + cannonTurnStep) as Fixed;
       } else {
         cannonTurnAccumulator = 0 as Fixed;
       }
@@ -465,7 +470,7 @@ function stepShip(
   if ((input & InputBits.Thrust) !== 0) {
     const maxSpeed = getShipMaxSpeed(ship.x, ship.y, state, activeSpec);
     const thrustScale = getThrustScale(vx, vy, shipAngle, maxSpeed);
-    const thrust = fixedMul(activeSpec.accel, thrustScale);
+    const thrust = fixedMul(fixedMul(activeSpec.accel, speedMultiplier), thrustScale);
     vx = fixedAdd(vx, fixedMul(cosFixed(shipAngle), thrust));
     vy = fixedAdd(vy, fixedMul(sinFixed(shipAngle), thrust));
   }
@@ -477,7 +482,7 @@ function stepShip(
     vy = fixedMul(vy, OVER_MAX_THRUST_DAMPING);
   }
 
-  ({ vx, vy } = clampVelocity(vx, vy, fixedAdd(speedLimit, TOP_SPEED_ALLOWANCE)));
+  ({ vx, vy } = clampVelocity(vx, vy, fixedAdd(speedLimit, fixedMul(TOP_SPEED_ALLOWANCE, speedMultiplier))));
 
   if (ship.freezeFrames === 0) {
     x = wrapSignedFixed(fixedAdd(ship.x, vx), state.arena.width);
@@ -490,13 +495,15 @@ function stepShip(
       y = wrapSignedFixed(fixedAdd(ship.y, vy), state.arena.height);
     }
   }
+  const projectileInheritedVx = ship.freezeFrames === 0 ? vx : (0 as Fixed);
+  const projectileInheritedVy = ship.freezeFrames === 0 ? vy : (0 as Fixed);
 
   if ((input & InputBits.FirePrimary) !== 0) {
     const result = firePrimary(ship, activeSpec, state, {
       x,
       y,
-      vx,
-      vy,
+      vx: projectileInheritedVx,
+      vy: projectileInheritedVy,
       shipAngle,
       cannonAngle,
       battery,
@@ -518,17 +525,22 @@ function stepShip(
   } else if (ship.shipId === 'frog' && (custom.frogCharge ?? 0) > 0 && primaryCooldown === 0) {
     const charge = custom.frogCharge ?? 0;
     projectiles.push(
-      createProjectile(
-        nextProjectileId,
-        ship.id,
-        'frogBubble',
-        x,
-        y,
-        shipAngle,
-        activeSpec.primary.speed,
-        52 + 6 * charge,
-        charge,
-        fixedFromInt(10 + 3 * charge),
+      scaleProjectileMotion(
+        createProjectile(
+          nextProjectileId,
+          ship.id,
+          'frogBubble',
+          x,
+          y,
+          shipAngle,
+          activeSpec.primary.speed,
+          52 + 6 * charge,
+          charge,
+          fixedFromInt(10 + 3 * charge),
+        ),
+        state,
+        projectileInheritedVx,
+        projectileInheritedVy,
       ),
     );
     nextProjectileId += 1;
@@ -567,8 +579,8 @@ function stepShip(
     const result = fireSecondary(ship, activeSpec, state, {
       x,
       y,
-      vx,
-      vy,
+      vx: projectileInheritedVx,
+      vy: projectileInheritedVy,
       shipAngle,
       battery,
       secondaryCooldown,
@@ -738,6 +750,14 @@ export function getActiveSpec(ship: ShipState, baseSpec: ShipSpec = getShipSpec(
   };
 }
 
+function getGameplaySpeedMultiplier(state: GameState): number {
+  return Number.isFinite(state.gameplay.speedMultiplier) && state.gameplay.speedMultiplier > 0 ? state.gameplay.speedMultiplier : 1;
+}
+
+function getGameplaySpeedMultiplierFixed(state: GameState): Fixed {
+  return fixed(getGameplaySpeedMultiplier(state));
+}
+
 function getThrustScale(vx: Fixed, vy: Fixed, shipAngle: ShipState['angle'], maxSpeed: Fixed): Fixed {
   const speed = fixedSqrt(fixedAdd(fixedSquared(vx), fixedSquared(vy)));
   if (speed === 0) {
@@ -756,12 +776,13 @@ function getThrustScale(vx: Fixed, vy: Fixed, shipAngle: ShipState['angle'], max
 }
 
 function getShipMaxSpeed(x: Fixed, y: Fixed, state: GameState, spec: ShipSpec): Fixed {
+  const speedMultiplier = getGameplaySpeedMultiplierFixed(state);
   const distance = getPlanetDistance(x, y, state);
   if (distance === 0) {
-    return spec.maxSpeed;
+    return fixedMul(spec.maxSpeed, speedMultiplier);
   }
 
-  return fixedAdd(spec.maxSpeed, fixedDiv(CLOSE_PLANET_SPEED_BOOST, distance));
+  return fixedMul(fixedAdd(spec.maxSpeed, fixedDiv(CLOSE_PLANET_SPEED_BOOST, distance)), speedMultiplier);
 }
 
 function applyPlanetGravity(
@@ -790,7 +811,7 @@ function applyPlanetGravity(
   const nextVx = fixedAdd(vx, gravityX);
   const nextVy = fixedAdd(vy, gravityY);
 
-  const highSpeed = fixedMul(spec.maxSpeed, GRAVITY_SPEED_PRESERVE_MULTIPLIER);
+  const highSpeed = fixedMul(fixedMul(spec.maxSpeed, getGameplaySpeedMultiplierFixed(state)), GRAVITY_SPEED_PRESERVE_MULTIPLIER);
   const currentSpeedSquared = fixedAdd(fixedSquared(vx), fixedSquared(vy));
   const nextSpeedSquared = fixedAdd(fixedSquared(nextVx), fixedSquared(nextVy));
   if (
@@ -859,7 +880,9 @@ function updateNurtipAsteroid(projectile: ProjectileState, state: GameState): Pr
 
   const baseAngle = Math.atan2(fixedToNumber(projectile.vy), fixedToNumber(projectile.vx));
   const targetAngle = getNurtipAsteroidTargetAngle(projectile, state);
-  const newAngle = framesSinceLaunch <= 1 ? targetAngle : slideRadians(baseAngle, targetAngle, NURTIP_ASTEROID_SLIDE_RATE);
+  const speedMultiplier = getGameplaySpeedMultiplier(state);
+  const newAngle =
+    framesSinceLaunch <= 1 ? targetAngle : slideRadians(baseAngle, targetAngle, NURTIP_ASTEROID_SLIDE_RATE * speedMultiplier);
   const cos = Math.cos(newAngle);
   const sin = Math.sin(newAngle);
 
@@ -873,7 +896,7 @@ function updateNurtipAsteroid(projectile: ProjectileState, state: GameState): Pr
     vx: fixed(cos),
     vy: fixed(sin),
     angle: angle(Math.round((newAngle / (Math.PI * 2)) * ANGLE_STEPS)),
-    rotation: fixedAdd(projectile.rotation, fixed(0.2)),
+    rotation: fixedAdd(projectile.rotation, fixed(0.2 * speedMultiplier)),
     ttl,
     active: !isInsidePlanet(newX, newY, state.planet.radius, state),
   };
@@ -890,7 +913,7 @@ function getNurtipAsteroidTargetAngle(projectile: ProjectileState, state: GameSt
 
   const slotCount = Math.max(1, siblings.length);
   const slotIndex = Math.max(0, siblings.indexOf(projectile.id));
-  return ((Math.PI * 2) * slotIndex) / slotCount + state.frame * NURTIP_ASTEROID_SPIN_RATE;
+  return ((Math.PI * 2) * slotIndex) / slotCount + state.frame * NURTIP_ASTEROID_SPIN_RATE * getGameplaySpeedMultiplier(state);
 }
 
 function slideRadians(current: number, target: number, maxStep: number): number {
@@ -1111,14 +1134,14 @@ function firePrimary(
 
   switch (ship.shipId) {
     case 'cannonade':
-      projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, context.x, context.y, context.cannonAngle));
+      projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, context.x, context.y, context.cannonAngle, state, context.vx, context.vy));
       nextProjectileId += 1;
       break;
     case 'zizlik':
       for (const node of getZizlikFireOrigins(ship, context.x, context.y, state.actors)) {
-        projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, node.x, node.y, ZIZLIK_SHOT_UP));
+        projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, node.x, node.y, ZIZLIK_SHOT_UP, state, context.vx, context.vy));
         nextProjectileId += 1;
-        projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, node.x, node.y, ZIZLIK_SHOT_DOWN));
+        projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, node.x, node.y, ZIZLIK_SHOT_DOWN, state, context.vx, context.vy));
         nextProjectileId += 1;
       }
       break;
@@ -1128,7 +1151,7 @@ function firePrimary(
       const offsetAngle = angle(context.shipAngle + [-64, 0, 64][roll.value]);
       const offsetX = fixedAdd(context.x, fixedMul(cosFixed(offsetAngle), fixedFromInt(10)));
       const offsetY = fixedAdd(context.y, fixedMul(sinFixed(offsetAngle), fixedFromInt(10)));
-      projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, offsetX, offsetY, context.shipAngle));
+      projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, offsetX, offsetY, context.shipAngle, state, context.vx, context.vy));
       nextProjectileId += 1;
       break;
     }
@@ -1145,28 +1168,30 @@ function firePrimary(
       const offsetAngle = angle(context.shipAngle + [-64, 0, 64][roll.value]);
       const offsetX = fixedAdd(context.x, fixedMul(cosFixed(offsetAngle), fixedFromInt(10)));
       const offsetY = fixedAdd(context.y, fixedMul(sinFixed(offsetAngle), fixedFromInt(10)));
-      const velocityRoll = nextRandom(rngSeed);
-      rngSeed = velocityRoll.seed;
-      const shipVelocityScale = fixed(0.65 * (0.5 + velocityRoll.value * 0.5));
-      const projectile = spawn(nextProjectileId, ship.id, spec.primary, offsetX, offsetY, context.shipAngle);
-      projectiles.push({
+      // Keep consuming the old reference velocity-share roll so Gooj's RNG stream stays stable.
+      rngSeed = nextRandom(rngSeed).seed;
+      const projectile = spawnRaw(nextProjectileId, ship.id, spec.primary, offsetX, offsetY, context.shipAngle);
+      const muzzleScale = fixedMul(PROJECTILE_MUZZLE_SPEED_SCALE, getGameplaySpeedMultiplierFixed(state));
+      projectiles.push(scaleProjectileTimingAndTracking({
         ...projectile,
-        vx: fixedAdd(fixedMul(projectile.vx, fixed(0.66)), fixedMul(context.vx, shipVelocityScale)),
-        vy: fixedAdd(fixedMul(projectile.vy, fixed(0.66)), fixedMul(context.vy, shipVelocityScale)),
-      });
+        // Reference Gooj used a random 0.65 * 0.5..1.0 ship-velocity share here.
+        // Current ship-frame aiming uses full ship velocity for every moving projectile.
+        vx: fixedAdd(fixedMul(fixedMul(projectile.vx, fixed(0.66)), muzzleScale), context.vx),
+        vy: fixedAdd(fixedMul(fixedMul(projectile.vy, fixed(0.66)), muzzleScale), context.vy),
+      }, state));
       nextProjectileId += 1;
       break;
     }
     case 'krab':
       if (custom.krabLongRange) {
-        projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, context.x, context.y, context.shipAngle));
+        projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, context.x, context.y, context.shipAngle, state, context.vx, context.vy));
         nextProjectileId += 1;
       } else {
         for (let index = 0; index < 4; index += 1) {
           const spread = nextRandom(rngSeed);
           rngSeed = spread.seed;
           const offset = radiansToAngleSteps(-0.5 + index * 0.333 + spread.value * 0.35);
-          projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, context.x, context.y, angle(context.shipAngle + offset)));
+          projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, context.x, context.y, angle(context.shipAngle + offset), state, context.vx, context.vy));
           nextProjectileId += 1;
         }
       }
@@ -1176,12 +1201,12 @@ function firePrimary(
       if (custom.nurtipPrimaryArmed) {
         return { actors, projectiles, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
       }
-      projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, context.x, context.y, context.shipAngle));
+      projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, context.x, context.y, context.shipAngle, state, context.vx, context.vy));
       nextProjectileId += 1;
       custom = { ...custom, nurtipPrimaryArmed: true };
       break;
     default:
-      projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, context.x, context.y, context.shipAngle));
+      projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, context.x, context.y, context.shipAngle, state, context.vx, context.vy));
       nextProjectileId += 1;
       break;
   }
@@ -1247,7 +1272,7 @@ function fireSecondary(
       if (hasCannonadeSecondaryProjectile(state.projectiles, ship.id)) {
         return { actors, projectiles, damageEffects, freezeEffects, battery, secondaryCooldown, x, y, custom, rngSeed, nextProjectileId, nextActorId };
       }
-      projectiles.push(spawn(nextProjectileId, ship.id, spec.secondary, context.x, context.y, context.shipAngle));
+      projectiles.push(spawn(nextProjectileId, ship.id, spec.secondary, context.x, context.y, context.shipAngle, state, context.vx, context.vy));
       nextProjectileId += 1;
       break;
     case 'krab':
@@ -1288,8 +1313,8 @@ function fireSecondary(
         rngSeed = lifeRoll.seed;
         const speedRoll = nextRandom(rngSeed);
         rngSeed = speedRoll.seed;
-        const velocityRoll = nextRandom(rngSeed);
-        rngSeed = velocityRoll.seed;
+        // Keep consuming the old reference velocity-share roll so later junk randomization stays stable.
+        rngSeed = nextRandom(rngSeed).seed;
         const angleRoll = nextRandom(rngSeed);
         rngSeed = angleRoll.seed;
         const varietyRoll = nextRandomInt(rngSeed, GOOJ_JUNK_VARIETIES);
@@ -1299,15 +1324,17 @@ function fireSecondary(
         );
         const junkX = fixedAdd(context.x, fixedMul(cosFixed(angle(context.shipAngle + 128)), fixedFromInt(40)));
         const junkY = fixedAdd(context.y, fixedMul(sinFixed(angle(context.shipAngle + 128)), fixedFromInt(40)));
-        const junk = spawn(nextProjectileId, ship.id, spec.secondary, junkX, junkY, junkAngle, varietyRoll.value);
+        const junk = spawnRaw(nextProjectileId, ship.id, spec.secondary, junkX, junkY, junkAngle, varietyRoll.value);
         const shotScale = fixed((50 + speedRoll.value * 100) / 150);
-        const shipVelocityScale = fixed(0.65 * (0.5 + velocityRoll.value * 0.5));
-        projectiles.push({
+        const muzzleScale = fixedMul(PROJECTILE_MUZZLE_SPEED_SCALE, getGameplaySpeedMultiplierFixed(state));
+        projectiles.push(scaleProjectileTimingAndTracking({
           ...junk,
-          vx: fixedAdd(fixedMul(junk.vx, shotScale), fixedMul(context.vx, shipVelocityScale)),
-          vy: fixedAdd(fixedMul(junk.vy, shotScale), fixedMul(context.vy, shipVelocityScale)),
+          // Reference Gooj junk used a random 0.65 * 0.5..1.0 ship-velocity share here.
+          // Current ship-frame aiming uses full ship velocity for every moving projectile.
+          vx: fixedAdd(fixedMul(fixedMul(junk.vx, shotScale), muzzleScale), context.vx),
+          vy: fixedAdd(fixedMul(fixedMul(junk.vy, shotScale), muzzleScale), context.vy),
           ttl: spec.secondary.ttl + Math.floor(lifeRoll.value * 720),
-        });
+        }, state));
         nextProjectileId += 1;
       }
       break;
@@ -1322,7 +1349,7 @@ function fireSecondary(
       break;
     }
     case 'nurtip': {
-      projectiles.push(spawn(nextProjectileId, ship.id, spec.secondary, context.x, context.y, angle(0)));
+      projectiles.push(spawn(nextProjectileId, ship.id, spec.secondary, context.x, context.y, angle(0), state, context.vx, context.vy));
       nextProjectileId += 1;
       break;
     }
@@ -1340,9 +1367,62 @@ function spawn(
   x: Fixed,
   y: Fixed,
   facing: Angle,
+  state: GameState,
+  inheritedVx: Fixed = 0 as Fixed,
+  inheritedVy: Fixed = 0 as Fixed,
+  variety = 0,
+): ProjectileState {
+  return scaleProjectileMotion(spawnRaw(id, ownerId, weapon, x, y, facing, variety), state, inheritedVx, inheritedVy);
+}
+
+function spawnRaw(
+  id: number,
+  ownerId: number,
+  weapon: WeaponSpec,
+  x: Fixed,
+  y: Fixed,
+  facing: Angle,
   variety = 0,
 ): ProjectileState {
   return createProjectile(id, ownerId, weapon.kind, x, y, facing, weapon.speed, weapon.ttl, weapon.damage, weapon.radius, weapon.trackPct ?? fixed(0), variety);
+}
+
+function scaleProjectileMotion(
+  projectile: ProjectileState,
+  state: GameState,
+  inheritedVx: Fixed = 0 as Fixed,
+  inheritedVy: Fixed = 0 as Fixed,
+): ProjectileState {
+  if (projectile.kind === 'nurtipAsteroid') {
+    return projectile;
+  }
+
+  const muzzleScale = fixedMul(PROJECTILE_MUZZLE_SPEED_SCALE, getGameplaySpeedMultiplierFixed(state));
+  const scaledProjectile = {
+    ...projectile,
+    vx: fixedMul(projectile.vx, muzzleScale),
+    vy: fixedMul(projectile.vy, muzzleScale),
+  };
+  const timedProjectile = scaleProjectileTimingAndTracking(scaledProjectile, state);
+  return {
+    ...timedProjectile,
+    vx: fixedAdd(timedProjectile.vx, inheritedVx),
+    vy: fixedAdd(timedProjectile.vy, inheritedVy),
+  };
+}
+
+function scaleProjectileTimingAndTracking(projectile: ProjectileState, state: GameState): ProjectileState {
+  const speedMultiplier = getGameplaySpeedMultiplier(state);
+  const speedMultiplierFixed = fixed(speedMultiplier);
+  return {
+    ...projectile,
+    ttl: scaleProjectileTtl(projectile.ttl, speedMultiplier),
+    trackPct: fixedMul(projectile.trackPct, speedMultiplierFixed),
+  };
+}
+
+function scaleProjectileTtl(ttl: number, speedMultiplier: number): number {
+  return Math.max(1, Math.round((ttl * PROJECTILE_TTL_SCALE) / speedMultiplier));
 }
 
 function hasCannonadeSecondaryProjectile(projectiles: readonly ProjectileState[], ownerId: number): boolean {

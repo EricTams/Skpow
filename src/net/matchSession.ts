@@ -133,7 +133,7 @@ export class NetworkMatchSession {
         roundId: options.roundId ?? 0,
         seed: options.seed ?? DEFAULT_MATCH_SEED,
         loadout: options.loadout ?? ['frog', 'cannonade'],
-        gameplay: options.gameplay ?? { gravityDivisor: 1 },
+        gameplay: options.gameplay ?? { gravityDivisor: 1, speedMultiplier: 1 },
         aiDemo: options.aiDemo ?? false,
         startFrame: 0,
         hostPlayerIndex: 0,
@@ -963,7 +963,7 @@ function isPlayerIndex(value: number): value is PlayerIndex {
 }
 
 function getSessionConfigKey(config: SessionConfigPacket): string {
-  return `${config.roundId}:${config.seed}:${config.loadout[0]}:${config.loadout[1]}:${config.gameplay.gravityDivisor}:${config.aiDemo}:${config.hostPlayerIndex}:${config.joinerPlayerIndex}`;
+  return `${config.roundId}:${config.seed}:${config.loadout[0]}:${config.loadout[1]}:${config.gameplay.gravityDivisor}:${config.gameplay.speedMultiplier}:${config.aiDemo}:${config.hostPlayerIndex}:${config.joinerPlayerIndex}`;
 }
 
 function mergeRecoverySnapshots(local: GameState, remote: GameState, localPlayerIndex: PlayerIndex): GameState {

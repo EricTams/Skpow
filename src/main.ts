@@ -34,6 +34,13 @@ const LAGGY_MP_FIND_TIMEOUT_MS = 1500;
 const MAX_FLEET_SLOTS = 14;
 const FLEET_NAV_REPEAT_FRAMES = 10;
 const LOW_GRAVITY_DIVISOR = 6;
+const SPEED_PRESETS = [
+  { id: 'low', label: 'Low', multiplier: 1 },
+  { id: 'mid', label: 'Mid', multiplier: 1.5 },
+  { id: 'high', label: 'High', multiplier: 2 },
+] as const;
+
+type SpeedSetting = (typeof SPEED_PRESETS)[number]['id'];
 
 interface FleetShip {
   readonly uid: string;
@@ -135,6 +142,7 @@ let networkDebugSettings: NetworkDebugSettings = {
 };
 let presentationCorrection: PresentationCorrection | null = null;
 let lowGravityEnabled = true;
+let speedSetting: SpeedSetting = 'low';
 let suppressPeerDisconnectPopup = false;
 let pauseMenuOpen = false;
 let lastRenderedPhaseName: AppPhase['name'] | null = null;
@@ -845,6 +853,14 @@ function handleMenuAction(button: HTMLButtonElement): void {
       lowGravityEnabled = !lowGravityEnabled;
       renderMenu();
       return;
+    case 'set-speed': {
+      const requestedSpeed = button.dataset.speed;
+      if (isSpeedSetting(requestedSpeed)) {
+        speedSetting = requestedSpeed;
+        renderMenu();
+      }
+      return;
+    }
     case 'main-single':
       appPhase = { name: 'singleBudget' };
       break;
@@ -1065,6 +1081,13 @@ function renderMainMenu(): string {
         <button type="button" data-action="main-ai-demo">Attract Mode</button>
         <button type="button" data-action="main-multi">Multiplayer</button>
         <button class="low-gravity-toggle-button" type="button" data-action="toggle-low-gravity" aria-pressed="${lowGravityEnabled}">${getLowGravityToggleLabel()}</button>
+        <div class="speed-control" aria-label="Speed">
+          <span>Speed:</span>
+          ${SPEED_PRESETS.map(
+            (preset) =>
+              `<button class="speed-toggle-button" type="button" data-action="set-speed" data-speed="${preset.id}" aria-pressed="${speedSetting === preset.id}">${preset.label}</button>`,
+          ).join('')}
+        </div>
         <button class="audio-toggle-button" type="button" data-action="toggle-audio" data-audio-toggle>${getAudioToggleLabel()}</button>
       </div>
     </section>
@@ -1074,11 +1097,20 @@ function renderMainMenu(): string {
 function getGameplaySettings(): GameplaySettings {
   return {
     gravityDivisor: lowGravityEnabled ? LOW_GRAVITY_DIVISOR : 1,
+    speedMultiplier: getSelectedSpeedPreset().multiplier,
   };
 }
 
 function getLowGravityToggleLabel(): string {
   return `Low Gravity: ${lowGravityEnabled ? 'On' : 'Off'}`;
+}
+
+function getSelectedSpeedPreset(): (typeof SPEED_PRESETS)[number] {
+  return SPEED_PRESETS.find((preset) => preset.id === speedSetting) ?? SPEED_PRESETS[0];
+}
+
+function isSpeedSetting(value: string | undefined): value is SpeedSetting {
+  return SPEED_PRESETS.some((preset) => preset.id === value);
 }
 
 function renderBudgetMenu(title: string, action: string, detail: string, backButton: string = ''): string {

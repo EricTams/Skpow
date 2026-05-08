@@ -24,6 +24,24 @@ describe('reference-style AI input', () => {
     expect(input & InputBits.TurnLeft).toBe(0);
   });
 
+  it('leads targets using velocity relative to the shooter', () => {
+    const stationaryShooter = withShips(createInitialState(123), [
+      { id: 0, x: fixedFromInt(0), y: fixedFromInt(-100), vx: fixed(2), vy: fixed(0), angle: angle(128) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(-500), vx: fixed(0), vy: fixed(0), angle: angle(64), custom: { cannonAngle: angle(64) } },
+    ]);
+    const matchingVelocityShooter = withShips(stationaryShooter, [
+      { id: 0, vx: fixed(2), vy: fixed(0) },
+      { id: 1, vx: fixed(2), vy: fixed(0) },
+    ]);
+
+    const stationaryInput = getAiInput(stationaryShooter, 1);
+    const matchingVelocityInput = getAiInput(matchingVelocityShooter, 1);
+
+    expect(stationaryInput & InputBits.TurnLeft).toBe(InputBits.TurnLeft);
+    expect(matchingVelocityInput & InputBits.TurnLeft).toBe(0);
+    expect(matchingVelocityInput & InputBits.TurnRight).toBe(0);
+  });
+
   it('fires when the opponent is close and aligned', () => {
     const state = withShips(createInitialState(123), [
       { id: 0, x: fixedFromInt(400), y: fixedFromInt(0), angle: angle(128) },

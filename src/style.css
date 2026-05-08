@@ -64,6 +64,31 @@ button:disabled {
   background: rgba(121, 192, 255, 0.24);
 }
 
+.speed-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: #8b949e;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.speed-toggle-button {
+  border-color: rgba(121, 192, 255, 0.68);
+  background: rgba(121, 192, 255, 0.08);
+  color: #79c0ff;
+}
+
+.speed-toggle-button[aria-pressed='true'] {
+  background: rgba(121, 192, 255, 0.24);
+  color: #c9e8ff;
+}
+
+.speed-toggle-button:hover,
+.speed-toggle-button:focus-visible {
+  background: rgba(121, 192, 255, 0.18);
+}
+
 button[data-fleet-nav]:focus-visible {
   outline: 2px solid #f8d878;
   outline-offset: 2px;

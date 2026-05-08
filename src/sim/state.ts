@@ -6,6 +6,7 @@ import type { GameState, GameplaySettings, ShipCustomState, ShipState } from './
 
 export const DEFAULT_GAMEPLAY_SETTINGS: GameplaySettings = {
   gravityDivisor: 1,
+  speedMultiplier: 1,
 };
 
 export function createInitialState(

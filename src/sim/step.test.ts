@@ -283,12 +283,71 @@ describe('ship physics', () => {
 
   it('scales planet gravity by the gameplay gravity divisor', () => {
     const normalState = createInitialState(123);
-    const lowGravityState = createInitialState(123, ['frog', 'cannonade'], { gravityDivisor: 6 });
+    const lowGravityState = createInitialState(123, ['frog', 'cannonade'], { gravityDivisor: 6, speedMultiplier: 1 });
 
     const normal = stepGame(withShip(normalState, { x: fixedFromInt(300), y: normalState.planet.y }), [0, 0]).ships[0];
     const lowGravity = stepGame(withShip(lowGravityState, { x: fixedFromInt(300), y: lowGravityState.planet.y }), [0, 0]).ships[0];
 
     expect(fixedToNumber(lowGravity.vx)).toBeCloseTo(fixedToNumber(normal.vx) / 6, 3);
+  });
+
+  it('scales ship turn speed and acceleration by the gameplay speed multiplier', () => {
+    const normalState = withShip(createInitialState(123, ['zizlik', 'cannonade'], { gravityDivisor: 1, speedMultiplier: 1 }), {
+      x: fixedFromInt(0),
+      y: fixedFromInt(0),
+      angle: angle(0),
+      freezeFrames: 1,
+    });
+    const fastState = withShip(createInitialState(123, ['zizlik', 'cannonade'], { gravityDivisor: 1, speedMultiplier: 2 }), {
+      x: fixedFromInt(0),
+      y: fixedFromInt(0),
+      angle: angle(0),
+      freezeFrames: 1,
+    });
+
+    const normal = stepGame(normalState, [InputBits.Thrust | InputBits.TurnRight, 0]).ships[0];
+    const fast = stepGame(fastState, [InputBits.Thrust | InputBits.TurnRight, 0]).ships[0];
+
+    expect(fast.angle).toBeGreaterThan(normal.angle);
+    expect(Math.hypot(fixedToNumber(fast.vx), fixedToNumber(fast.vy))).toBeCloseTo(
+      Math.hypot(fixedToNumber(normal.vx), fixedToNumber(normal.vy)) * 2,
+      2,
+    );
+  });
+
+  it('scales Cannonade barrel turn speed by the gameplay speed multiplier', () => {
+    const normal = stepGame(createInitialState(123, ['cannonade', 'frog'], { gravityDivisor: 1, speedMultiplier: 1 }), [
+      InputBits.TurnRight,
+      0,
+    ]).ships[0];
+    const fast = stepGame(createInitialState(123, ['cannonade', 'frog'], { gravityDivisor: 1, speedMultiplier: 2 }), [
+      InputBits.TurnRight,
+      0,
+    ]).ships[0];
+
+    expect(fast.custom.cannonAngle ?? fast.angle).toBeGreaterThan(normal.custom.cannonAngle ?? normal.angle);
+  });
+
+  it('scales ship speed caps by the gameplay speed multiplier', () => {
+    const normalState = withShip(createInitialState(123, ['frog', 'cannonade'], { gravityDivisor: 1, speedMultiplier: 1 }), {
+      x: fixedFromInt(0),
+      y: fixedFromInt(0),
+      vx: fixedFromInt(100),
+      vy: fixed(0),
+      freezeFrames: 1,
+    });
+    const fastState = withShip(createInitialState(123, ['frog', 'cannonade'], { gravityDivisor: 1, speedMultiplier: 2 }), {
+      x: fixedFromInt(0),
+      y: fixedFromInt(0),
+      vx: fixedFromInt(100),
+      vy: fixed(0),
+      freezeFrames: 1,
+    });
+
+    const normal = stepGame(normalState, [0, 0]).ships[0];
+    const fast = stepGame(fastState, [0, 0]).ships[0];
+
+    expect(fixedToNumber(fast.vx)).toBeCloseTo(fixedToNumber(normal.vx) * 2, 2);
   });
 
   it('lets a ship thrust away from the planet well', () => {
@@ -317,7 +376,7 @@ describe('reference-backed ship abilities', () => {
     expect(charging.ships[0].battery).toBe(29);
     expect(charging.ships[0].custom.frogCharge).toBe(1);
     expect(released.projectiles).toHaveLength(1);
-    expect(released.projectiles[0]).toMatchObject({ kind: 'frogBubble', damage: 1, ttl: 57 });
+    expect(released.projectiles[0]).toMatchObject({ kind: 'frogBubble', damage: 1, ttl: 72 });
   });
 
   it('lets the Frog shield absorb one incoming damage then clear', () => {
@@ -336,7 +395,7 @@ describe('reference-backed ship abilities', () => {
 
     expect(next.ships[0].battery).toBe(18);
     expect(next.ships[0].primaryCooldown).toBe(75);
-    expect(next.projectiles[0]).toMatchObject({ kind: 'cannonadeBall', damage: 7, ttl: 154 });
+    expect(next.projectiles[0]).toMatchObject({ kind: 'cannonadeBall', damage: 7, ttl: 193 });
   });
 
   it('fires straight shots along the aiming angle', () => {
@@ -351,6 +410,65 @@ describe('reference-backed ship abilities', () => {
 
     expect(next.projectiles[0].vx).toBeGreaterThan(0);
     expect(Math.abs(next.projectiles[0].vy)).toBeLessThan(fixed(0.001));
+  });
+
+  it('inherits shooter velocity so aimed shots stay ship-relative', () => {
+    const state = withShip(createInitialState(123, ['cannonade', 'frog'], { gravityDivisor: 1_000_000, speedMultiplier: 1 }), {
+      x: fixedFromInt(500),
+      y: fixedFromInt(0),
+      vx: fixed(0),
+      vy: fixed(2),
+      angle: angle(0),
+      custom: { cannonAngle: angle(128) },
+    });
+
+    const next = stepGame(state, [InputBits.FirePrimary, 0]);
+    const projectile = next.projectiles[0];
+
+    expect(projectile.vx).toBeLessThan(0);
+    expect(fixedToNumber(projectile.vy)).toBeCloseTo(2, 2);
+  });
+
+  it('does not inherit shooter velocity while position locked by freeze', () => {
+    const state = withShip(createInitialState(123, ['cannonade', 'frog'], { gravityDivisor: 1_000_000, speedMultiplier: 1 }), {
+      x: fixedFromInt(500),
+      y: fixedFromInt(0),
+      vx: fixed(0),
+      vy: fixed(2),
+      angle: angle(0),
+      custom: { cannonAngle: angle(128) },
+      freezeFrames: 1,
+    });
+
+    const next = stepGame(state, [InputBits.FirePrimary, 0]);
+    const projectile = next.projectiles[0];
+
+    expect(projectile.vx).toBeLessThan(0);
+    expect(Math.abs(fixedToNumber(projectile.vy))).toBeLessThan(0.001);
+  });
+
+  it('scales projectile speed and lifetime while preserving approximate range', () => {
+    const normalState = withShip(createInitialState(123, ['cannonade', 'frog'], { gravityDivisor: 1, speedMultiplier: 1 }), {
+      x: fixedFromInt(500),
+      y: fixedFromInt(0),
+      angle: angle(0),
+      custom: { cannonAngle: angle(0) },
+    });
+    const fastState = withShip(createInitialState(123, ['cannonade', 'frog'], { gravityDivisor: 1, speedMultiplier: 2 }), {
+      x: fixedFromInt(500),
+      y: fixedFromInt(0),
+      angle: angle(0),
+      custom: { cannonAngle: angle(0) },
+    });
+
+    const normal = stepGame(normalState, [InputBits.FirePrimary, 0]).projectiles[0];
+    const fast = stepGame(fastState, [InputBits.FirePrimary, 0]).projectiles[0];
+    const normalRange = fixedToNumber(normal.vx) * (normal.ttl + 1);
+    const fastRange = fixedToNumber(fast.vx) * (fast.ttl + 1);
+
+    expect(fixedToNumber(fast.vx)).toBeCloseTo(fixedToNumber(normal.vx) * 2, 2);
+    expect(fast.ttl).toBe(96);
+    expect(Math.abs(fastRange - normalRange)).toBeLessThan(20);
   });
 
   it('turns tracking projectiles toward their target', () => {
@@ -377,6 +495,21 @@ describe('reference-backed ship abilities', () => {
 
     expect(next.projectiles[0].vy).toBeGreaterThan(0);
     expect(next.projectiles[0].vx).toBeGreaterThan(0);
+  });
+
+  it('scales tracking projectile speed, lifetime, and turn rate', () => {
+    const normal = stepGame(createInitialState(123, ['cannonade', 'frog'], { gravityDivisor: 1, speedMultiplier: 1 }), [
+      InputBits.FireSecondary,
+      0,
+    ]).projectiles[0];
+    const fast = stepGame(createInitialState(123, ['cannonade', 'frog'], { gravityDivisor: 1, speedMultiplier: 2 }), [
+      InputBits.FireSecondary,
+      0,
+    ]).projectiles[0];
+
+    expect(fixedToNumber(fast.vx)).toBeCloseTo(fixedToNumber(normal.vx) * 2, 2);
+    expect(fast.ttl).toBe(Math.round((normal.ttl + 1) / 2) - 1);
+    expect(fixedToNumber(fast.trackPct)).toBeCloseTo(fixedToNumber(normal.trackPct) * 2, 4);
   });
 
   it('only allows one Cannonade secondary projectile at a time', () => {
@@ -493,7 +626,7 @@ describe('reference-backed ship abilities', () => {
     expect(withNode.actors.filter((actor) => actor.kind === 'zizlikNode' && actor.ownerId === 0)).toHaveLength(1);
     expect(withNode.ships[0].battery).toBe(0);
     expect(fired.projectiles).toHaveLength(4);
-    expect(fired.projectiles.every((projectile) => Math.abs(fixedToNumber(projectile.vx)) < 0.001)).toBe(true);
+    expect(fired.projectiles.every((projectile) => Math.abs(fixedToNumber(projectile.vx) - fixedToNumber(fired.ships[0].vx)) < 0.001)).toBe(true);
     expect(fired.projectiles.filter((projectile) => projectile.vy > 0)).toHaveLength(2);
     expect(fired.projectiles.filter((projectile) => projectile.vy < 0)).toHaveLength(2);
   });
@@ -517,6 +650,40 @@ describe('reference-backed ship abilities', () => {
     expect(next.projectiles.every((projectile) => fixedToNumber(next.ships[0].x) - fixedToNumber(projectile.x) > 30)).toBe(true);
   });
 
+  it('scales Gooj blended primary projectile velocity', () => {
+    const normalStationaryState = withShip(createInitialState(123, ['gooj', 'frog'], { gravityDivisor: 1, speedMultiplier: 1 }), {
+      x: fixedFromInt(500),
+      y: fixedFromInt(0),
+      vx: fixed(0),
+      vy: fixed(0),
+      angle: angle(0),
+      freezeFrames: 1,
+    });
+    const fastStationaryState = withShip(createInitialState(123, ['gooj', 'frog'], { gravityDivisor: 1, speedMultiplier: 2 }), {
+      x: fixedFromInt(500),
+      y: fixedFromInt(0),
+      vx: fixed(0),
+      vy: fixed(0),
+      angle: angle(0),
+      freezeFrames: 1,
+    });
+    const normalMovingState = withShip(normalStationaryState, { vx: fixed(1) });
+    const fastMovingState = withShip(fastStationaryState, { vx: fixed(1) });
+
+    const normalStationary = stepGame(normalStationaryState, [InputBits.FirePrimary, 0]).projectiles[0];
+    const fastStationary = stepGame(fastStationaryState, [InputBits.FirePrimary, 0]).projectiles[0];
+    const normalMoving = stepGame(normalMovingState, [InputBits.FirePrimary, 0]).projectiles[0];
+    const fastMoving = stepGame(fastMovingState, [InputBits.FirePrimary, 0]).projectiles[0];
+
+    expect(fixedToNumber(fastStationary.vx)).toBeCloseTo(fixedToNumber(normalStationary.vx) * 2, 2);
+    expect(fixedToNumber(fastMoving.vx) - fixedToNumber(fastStationary.vx)).toBeCloseTo(
+      fixedToNumber(normalMoving.vx) - fixedToNumber(normalStationary.vx),
+      3,
+    );
+    expect(fastMoving.ttl).toBe(Math.round((normalMoving.ttl + 1) / 2) - 1);
+    expect(fixedToNumber(fastMoving.trackPct)).toBeCloseTo(fixedToNumber(normalMoving.trackPct) * 2, 4);
+  });
+
   it('gates Nurtip asteroid launches by their battery cost', () => {
     const lowBattery = withShip(createInitialState(123, ['nurtip', 'frog']), { battery: 5 });
     const blocked = stepGame(lowBattery, [InputBits.FireSecondary, 0]);
@@ -527,6 +694,26 @@ describe('reference-backed ship abilities', () => {
     expect(blocked.ships[0].battery).toBe(5);
     expect(fired.projectiles.filter((projectile) => projectile.kind === 'nurtipAsteroid')).toHaveLength(1);
     expect(fired.ships[0].battery).toBe(0);
+  });
+
+  it('scales Nurtip asteroid orbit rotation by the gameplay speed multiplier', () => {
+    const normalLaunch = stepGame(createInitialState(123, ['nurtip', 'frog'], { gravityDivisor: 1, speedMultiplier: 1 }), [
+      InputBits.FireSecondary,
+      0,
+    ]);
+    const fastLaunch = stepGame(createInitialState(123, ['nurtip', 'frog'], { gravityDivisor: 1, speedMultiplier: 2 }), [
+      InputBits.FireSecondary,
+      0,
+    ]);
+    const normal = stepGame(normalLaunch, [0, 0]).projectiles.find((projectile) => projectile.kind === 'nurtipAsteroid');
+    const fast = stepGame(fastLaunch, [0, 0]).projectiles.find((projectile) => projectile.kind === 'nurtipAsteroid');
+
+    expect(normal).toBeDefined();
+    expect(fast).toBeDefined();
+    if (!normal || !fast) {
+      return;
+    }
+    expect(fixedToNumber(fast.rotation)).toBeCloseTo(fixedToNumber(normal.rotation) * 2, 3);
   });
 
   it('keeps Nurtip primary missiles moving in a straight line', () => {
