@@ -52,6 +52,14 @@ const ZIZLIK_SHOT_DOWN = angle(192);
 const GOOJ_BACK_NODE_OFFSET = fixedFromInt(-40);
 const GOOJ_JUNK_SHOT_VARIANCE_RADIANS = 0.1;
 const GOOJ_JUNK_VARIETIES = 7;
+const DUK_INITIAL_MISSILE_COUNT = 4;
+const DUK_STUNNER_SHOT_VARIANCE_RADIANS = 0.08;
+const DUK_MISSILE_SHOT_VARIANCE_RADIANS = 0.01;
+const DUK_STUNNER_FREEZE_FRAMES = 40;
+const DUK_STUNNER_SLOW_TTL = 700;
+const DUK_STUNNER_RAMP_FRAMES = 300;
+const DUK_STUNNER_FULL_SPEED_TTL = DUK_STUNNER_SLOW_TTL + DUK_STUNNER_RAMP_FRAMES;
+const DUK_LEGACY_LIFE_DECAY = 3;
 const PSCOUT_BEAM_FRAMES = 200;
 const PSCOUT_BEAM_DAMAGE_FRAME = 50;
 // Nurtip remote-detonation primary: tap to launch, hold to cruise, release to AOE-detonate.
@@ -848,6 +856,9 @@ export function stepProjectile(projectile: ProjectileState, state: GameState, rn
   if (projectile.kind === 'nurtipAsteroid') {
     return updateNurtipAsteroid(projectile, state);
   }
+  if (projectile.kind === 'dukStunner') {
+    return updateDukStunner(projectile, state, rngSeed);
+  }
 
   const steered = projectile.trackPct > 0 ? steerProjectile(projectile, state, rngSeed) : projectile;
   const x = wrapSignedFixed(fixedAdd(steered.x, steered.vx), state.arena.width);
@@ -862,6 +873,39 @@ export function stepProjectile(projectile: ProjectileState, state: GameState, rn
     rotation: fixedAdd(steered.rotation, fixed(0.2)),
     active: ttl > 0 && !isInsidePlanet(x, y, state.planet.radius, state),
   };
+}
+
+function updateDukStunner(projectile: ProjectileState, state: GameState, rngSeed: RngSeed): ProjectileState {
+  const steered = projectile.trackPct > 0 ? steerProjectile(projectile, state, rngSeed) : projectile;
+  const speedMultiplier = getGameplaySpeedMultiplierFixed(state);
+  const ttl = projectile.ttl - getDukLegacyLifeDecay(state);
+  if (ttl < 1) {
+    return { ...steered, ttl, active: false };
+  }
+
+  const effectiveLife = Math.min(ttl, DUK_STUNNER_FULL_SPEED_TTL);
+  const lifeAboveSlow = effectiveLife - DUK_STUNNER_SLOW_TTL;
+  const thrustRatio =
+    lifeAboveSlow > 0
+      ? Math.max(0, 1 - (0.00333 * (DUK_STUNNER_RAMP_FRAMES - lifeAboveSlow)) ** 2)
+      : 0;
+  const xVelocity = fixedMul(fixedMul(steered.vx, fixed(thrustRatio)), speedMultiplier);
+  const yVelocity = fixedMul(fixedMul(steered.vy, fixed(thrustRatio)), speedMultiplier);
+  const x = wrapSignedFixed(fixedAdd(steered.x, xVelocity), state.arena.width);
+  const y = wrapSignedFixed(fixedAdd(steered.y, yVelocity), state.arena.height);
+
+  return {
+    ...steered,
+    x,
+    y,
+    ttl,
+    rotation: fixedAdd(steered.rotation, fixed(0.2)),
+    active: !isInsidePlanet(x, y, state.planet.radius, state),
+  };
+}
+
+function getDukLegacyLifeDecay(state: GameState): number {
+  return Math.max(1, Math.round(DUK_LEGACY_LIFE_DECAY * getGameplaySpeedMultiplier(state)));
 }
 
 function updateNurtipAsteroid(projectile: ProjectileState, state: GameState): ProjectileState {
@@ -1205,6 +1249,16 @@ function firePrimary(
       nextProjectileId += 1;
       custom = { ...custom, nurtipPrimaryArmed: true };
       break;
+    case 'duk': {
+      const spread = nextRandom(rngSeed);
+      rngSeed = spread.seed;
+      const shotAngle = angle(
+        context.shipAngle + radiansToAngleSteps(DUK_STUNNER_SHOT_VARIANCE_RADIANS * (1 - 2 * spread.value)),
+      );
+      projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, context.x, context.y, shotAngle, state, context.vx, context.vy));
+      nextProjectileId += 1;
+      break;
+    }
     default:
       projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, context.x, context.y, context.shipAngle, state, context.vx, context.vy));
       nextProjectileId += 1;
@@ -1353,6 +1407,21 @@ function fireSecondary(
       nextProjectileId += 1;
       break;
     }
+    case 'duk': {
+      const missileCount = custom.dukMissileCount ?? DUK_INITIAL_MISSILE_COUNT;
+      if (missileCount <= 0) {
+        return { actors, projectiles, damageEffects, freezeEffects, battery, secondaryCooldown, x, y, custom, rngSeed, nextProjectileId, nextActorId };
+      }
+      const spread = nextRandom(rngSeed);
+      rngSeed = spread.seed;
+      const shotAngle = angle(
+        context.shipAngle + radiansToAngleSteps(DUK_MISSILE_SHOT_VARIANCE_RADIANS * (1 - 2 * spread.value)),
+      );
+      projectiles.push(spawn(nextProjectileId, ship.id, spec.secondary, context.x, context.y, shotAngle, state, context.vx, context.vy));
+      nextProjectileId += 1;
+      custom = { ...custom, dukMissileCount: missileCount - 1 };
+      break;
+    }
   }
 
   battery -= spec.secondary.cost;
@@ -1403,6 +1472,14 @@ function scaleProjectileMotion(
     vx: fixedMul(projectile.vx, muzzleScale),
     vy: fixedMul(projectile.vy, muzzleScale),
   };
+  if (projectile.kind === 'dukStunner') {
+    return {
+      ...scaledProjectile,
+      vx: fixedAdd(scaledProjectile.vx, inheritedVx),
+      vy: fixedAdd(scaledProjectile.vy, inheritedVy),
+    };
+  }
+
   const timedProjectile = scaleProjectileTimingAndTracking(scaledProjectile, state);
   return {
     ...timedProjectile,
@@ -1517,6 +1594,18 @@ function resolveProjectileHit(
         createAttachedActor(nextActorId, 'pscoutBeacon', projectile.ownerId, slot, hit.ship.x, hit.ship.y, hit.ship.angle, projectile.radius, hit.ship.id),
       ],
       nextActorId: nextActorId + 1,
+    };
+  }
+
+  if (projectile.kind === 'dukStunner') {
+    return {
+      ships: ships.map((ship) =>
+        ship.id === hit.ship.id
+          ? { ...damageShip(ship, projectile.damage), freezeFrames: Math.max(ship.freezeFrames, DUK_STUNNER_FREEZE_FRAMES) }
+          : ship,
+      ),
+      actors,
+      nextActorId,
     };
   }
 

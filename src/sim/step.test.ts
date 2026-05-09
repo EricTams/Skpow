@@ -853,6 +853,132 @@ describe('reference-backed ship abilities', () => {
     expect(beamed.ships[1].crew).toBe(26);
     expect(beamed.actors.filter((actor) => actor.kind === 'pscoutBeacon' && actor.attachedToShipId === 1)).toHaveLength(0);
   });
+
+  it('initializes Duk with reference stats and missile rack state', () => {
+    const state = createInitialState(123, ['duk', 'frog']);
+
+    expect(state.ships[0]).toMatchObject({ shipId: 'duk', crew: 18, maxCrew: 18, battery: 16, maxBattery: 16 });
+    expect(state.ships[0].custom.dukMissileCount).toBe(4);
+    expect(getShipSpec('duk').secondary.framesPerShot).toBe(300);
+  });
+
+  it('fires Duk stunners with battery cost and cooldown', () => {
+    const next = stepGame(createInitialState(123, ['duk', 'frog']), [InputBits.FirePrimary, 0]);
+
+    expect(next.ships[0].battery).toBe(14);
+    expect(next.ships[0].primaryCooldown).toBe(60);
+    expect(next.projectiles[0]).toMatchObject({ kind: 'dukStunner', damage: 1, ttl: 997 });
+  });
+
+  it('freezes targets hit by Duk stunners', () => {
+    const next = stepGame(withProjectileAtShip(createInitialState(123, ['duk', 'frog']), 0, 1, 1, 'dukStunner'), [0, 0]);
+
+    expect(next.ships[1].crew).toBe(29);
+    expect(next.ships[1].freezeFrames).toBe(40);
+  });
+
+  it('slows Duk stunners to a stop like the reference custom update', () => {
+    const base = createInitialState(123, ['duk', 'frog']);
+    const fullSpeed = stepGame(withProjectile(base, buildProjectile({
+      ownerId: 0,
+      x: fixedFromInt(1000),
+      y: fixedFromInt(1000),
+      kind: 'dukStunner',
+      vx: fixed(10),
+      ttl: 1000,
+    })), [0, 0]).projectiles[0];
+    const slowing = stepGame(withProjectile(base, buildProjectile({
+      ownerId: 0,
+      x: fixedFromInt(1000),
+      y: fixedFromInt(1000),
+      kind: 'dukStunner',
+      vx: fixed(10),
+      ttl: 850,
+    })), [0, 0]).projectiles[0];
+    const stopped = stepGame(withProjectile(base, buildProjectile({
+      ownerId: 0,
+      x: fixedFromInt(1000),
+      y: fixedFromInt(1000),
+      kind: 'dukStunner',
+      vx: fixed(10),
+      ttl: 703,
+    })), [0, 0]).projectiles[0];
+
+    expect(fixedToNumber(fullSpeed.x) - 1000).toBeCloseTo(10, 2);
+    expect(fixedToNumber(slowing.x) - 1000).toBeGreaterThan(0);
+    expect(fixedToNumber(slowing.x) - 1000).toBeLessThan(10);
+    expect(fixedToNumber(stopped.x)).toBeCloseTo(1000, 4);
+  });
+
+  it('starts spawned Duk stunners in the reference slowdown window', () => {
+    let state = stepGame(createInitialState(123, ['duk', 'frog']), [InputBits.FirePrimary, 0]);
+    const initial = state.projectiles[0];
+    expect(initial.ttl).toBe(997);
+    const firstX = initial.x;
+
+    for (let frame = 0; frame < 50; frame += 1) {
+      state = stepGame(state, [0, 0]);
+    }
+    const midStep = state.projectiles[0];
+    for (let frame = 0; frame < 50; frame += 1) {
+      state = stepGame(state, [0, 0]);
+    }
+    const stopped = state.projectiles[0];
+    for (let frame = 0; frame < 20; frame += 1) {
+      state = stepGame(state, [0, 0]);
+    }
+    const stillStopped = state.projectiles[0];
+
+    expect(Math.abs(midStep.x - firstX)).toBeGreaterThan(0);
+    expect(stillStopped.x).toBe(stopped.x);
+  });
+
+  it('spends Duk missile rack ammo and blocks empty-rack shots', () => {
+    const fired = stepGame(createInitialState(123, ['duk', 'frog']), [InputBits.FireSecondary, 0]);
+    expect(fired.ships[0].battery).toBe(14);
+    expect(fired.ships[0].secondaryCooldown).toBe(300);
+    expect(fired.ships[0].custom.dukMissileCount).toBe(3);
+    expect(fired.projectiles[0]).toMatchObject({ kind: 'dukMissile', damage: 10 });
+
+    const emptyRack = withShip(fired, {
+      battery: 16,
+      secondaryCooldown: 0,
+      custom: { ...fired.ships[0].custom, dukMissileCount: 0 },
+    });
+    const blocked = stepGame({ ...emptyRack, projectiles: [] }, [InputBits.FireSecondary, 0]);
+
+    expect(blocked.ships[0].battery).toBe(16);
+    expect(blocked.projectiles).toHaveLength(0);
+  });
+
+  it('hydrates persistent round-start crew and actors', () => {
+    const pscout = createInitialState(123, ['pscout', 'frog'], undefined, [
+      { crew: 4, pscoutBeaconSlots: [0, 1] },
+      undefined,
+    ]);
+    const zizlik = createInitialState(123, ['zizlik', 'frog'], undefined, [
+      { crew: 6, zizlikNodeSlots: [1, -1] },
+      undefined,
+    ]);
+
+    expect(pscout.ships[0].crew).toBe(4);
+    expect(pscout.actors.filter((actor) => actor.kind === 'pscoutBeacon' && actor.ownerId === 0 && actor.attachedToShipId === 1)).toHaveLength(2);
+    expect(zizlik.ships[0].crew).toBe(6);
+    expect(zizlik.actors.filter((actor) => actor.kind === 'zizlikNode' && actor.ownerId === 0 && actor.attachedToShipId === 0)).toHaveLength(2);
+  });
+
+  it('keeps Duk state deterministic under replay', () => {
+    const frames = Array.from({ length: 90 }, (_, frame) => [
+      frame === 0 ? InputBits.FireSecondary : frame === 30 ? InputBits.FirePrimary : 0,
+      frame % 10 === 0 ? InputBits.Thrust : 0,
+    ] as const);
+
+    const first = runReplay(createInitialState(123, ['duk', 'frog']), frames, hashState);
+    const second = runReplay(createInitialState(123, ['duk', 'frog']), frames, hashState);
+
+    expect(first.frameHashes).toEqual(second.frameHashes);
+    expect(first.finalState.ships[0].custom.dukMissileCount).toBe(second.finalState.ships[0].custom.dukMissileCount);
+  });
 });
 
 function withProjectileAtShip(
@@ -866,6 +992,14 @@ function withProjectileAtShip(
   return {
     ...state,
     projectiles: [buildProjectile({ ownerId, x: target.x, y: target.y, damage, kind })],
+    nextProjectileId: 100,
+  };
+}
+
+function withProjectile(state: GameState, projectile: ProjectileState): GameState {
+  return {
+    ...state,
+    projectiles: [projectile],
     nextProjectileId: 100,
   };
 }

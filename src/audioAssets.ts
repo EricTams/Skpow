@@ -11,6 +11,8 @@ import krabSpecialUrl from '../sfx/Krab_SW.ogg?url';
 import krabFireUrl from '../sfx/krab_WF.ogg?url';
 import kronSpecialUrl from '../sfx/kron_SW.ogg?url';
 import kronFireUrl from '../sfx/kron_WF.ogg?url';
+import missileshipSpecialUrl from '../sfx/missileship_SW.ogg?url';
+import missileshipFireUrl from '../sfx/missileship_WF.ogg?url';
 import nurtipSpecialUrl from '../sfx/nurtip_SW.ogg?url';
 import nurtipFireUrl from '../sfx/nurtip_WF.ogg?url';
 import panthonSpecialUrl from '../sfx/panthon_SW2.ogg?url';
@@ -47,6 +49,8 @@ export const audioAssets = {
     SOUND_VOSKUM_SPECIAL: voskumSpecialUrl,
     SOUND_KRAB_FIRE: krabFireUrl,
     SOUND_KRAB_SPECIAL: krabSpecialUrl,
+    SOUND_MISSILESHIP_FIRE: missileshipFireUrl,
+    SOUND_MISSILESHIP_SPECIAL: missileshipSpecialUrl,
   },
 } as const;
 
@@ -88,5 +92,9 @@ export const shipSfx: Record<ShipId, { readonly primary: SfxId; readonly seconda
   nurtip: {
     primary: 'SOUND_NURTIP_FIRE',
     secondary: 'SOUND_NURTIP_SPECIAL',
+  },
+  duk: {
+    primary: 'SOUND_MISSILESHIP_FIRE',
+    secondary: 'SOUND_MISSILESHIP_SPECIAL',
   },
 };

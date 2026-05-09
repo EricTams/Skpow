@@ -778,25 +778,34 @@ button.fleet-slot {
   white-space: nowrap;
 }
 
+.ui-ship-art,
 .fleet-ship-thumb {
   position: relative;
   display: grid;
   place-items: center;
-  width: 100%;
-  min-height: 2.55rem;
   pointer-events: none;
 }
 
-.fleet-ship-thumb img {
-  max-width: 86%;
-  max-height: 2.75rem;
+.ui-ship-art img {
+  position: absolute;
+  left: 50%;
+  top: 50%;
   object-fit: contain;
-  transform: scale(var(--fleet-ship-scale));
+  transform: translate(calc(-50% + var(--catalog-ship-offset-x, 0px)), calc(-50% + var(--catalog-ship-offset-y, 0px))) scale(var(--catalog-ship-scale));
+  transform-origin: center;
   image-rendering: auto;
 }
 
-.fleet-ship-thumb .fleet-ship-overlay {
-  position: absolute;
+.fleet-ship-thumb {
+  width: 100%;
+  min-height: 2.55rem;
+}
+
+.fleet-slot-ship {
+  z-index: 1;
+  width: 100%;
+  min-height: 2.55rem;
+  overflow: visible;
 }
 
 .fleet-command-panel {
@@ -1068,6 +1077,7 @@ button.fleet-slot {
 }
 
 .fleet-picker-ship {
+  position: relative;
   grid-template-columns: 1fr;
   justify-items: center;
   min-height: 0;
@@ -1110,6 +1120,35 @@ button.fleet-slot {
   min-height: 1.25rem;
 }
 
+.fleet-ship-picker .fleet-picker-catalog-art {
+  z-index: 1;
+  width: 100%;
+  min-height: 2.35rem;
+  margin-left: 0;
+  overflow: visible;
+  transform: translateY(0.35rem);
+}
+
+.fleet-picker-ship > div {
+  position: relative;
+  z-index: 2;
+}
+
+.fleet-picker-ship-cost {
+  position: absolute;
+  right: 0.25rem;
+  top: 0.2rem;
+  z-index: 3;
+  color: #f8d878;
+  font-size: 0.62rem;
+  font-weight: 900;
+}
+
+.fleet-ship-picker .fleet-picker-catalog-art img {
+  max-width: none;
+  max-height: none;
+}
+
 .fleet-ship-picker .fleet-catalog-ship img {
   max-height: 1.25rem;
 }
@@ -1123,6 +1162,510 @@ button.fleet-slot {
 .fleet-picker-ship.player-interaction-active:hover,
 .fleet-picker-ship.player-interaction-active:focus-visible {
   border-color: var(--player-indicator-color);
+}
+
+.ship-catalog-screen {
+  width: min(98vw, 78rem);
+  height: min(96vh, 43rem);
+  display: grid;
+  grid-template-columns: minmax(12rem, 0.24fr) minmax(0, 1fr);
+  gap: 0.75rem;
+  overflow: hidden;
+  border: 1px solid rgba(121, 192, 255, 0.32);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(5, 8, 20, 0.84), rgba(2, 4, 13, 0.97)),
+    var(--catalog-space) center / cover;
+  box-shadow:
+    inset 0 0 80px rgba(31, 111, 235, 0.16),
+    0 24px 80px rgba(0, 0, 0, 0.58);
+  padding: 0.75rem;
+}
+
+.ship-catalog-sidebar,
+.ship-spec-sheet {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid rgba(121, 192, 255, 0.24);
+  background: rgba(2, 4, 13, 0.76);
+}
+
+.ship-catalog-sidebar {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  gap: 0.65rem;
+  border-radius: 14px;
+  padding: 0.85rem;
+}
+
+.ship-catalog-sidebar h2,
+.ship-spec-header h2,
+.ship-spec-readout h3 {
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.ship-catalog-sidebar h2 {
+  color: #f0f6fc;
+  font-size: clamp(1.25rem, 2.6vw, 2rem);
+  letter-spacing: 0.08em;
+}
+
+.ship-catalog-entry-list {
+  display: grid;
+  align-content: start;
+  gap: 0.4rem;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-color: rgba(248, 216, 120, 0.78) rgba(5, 8, 70, 0.92);
+  scrollbar-width: thin;
+}
+
+.ship-catalog-entry-list::-webkit-scrollbar {
+  width: 0.6rem;
+}
+
+.ship-catalog-entry-list::-webkit-scrollbar-track {
+  border: 1px solid rgba(121, 192, 255, 0.22);
+  background: rgba(5, 8, 70, 0.92);
+}
+
+.ship-catalog-entry-list::-webkit-scrollbar-thumb {
+  border: 1px solid rgba(2, 4, 13, 0.86);
+  background: linear-gradient(180deg, #f8d878, #79c0ff);
+  box-shadow: inset 0 0 8px rgba(2, 4, 13, 0.55);
+}
+
+.ship-catalog-list-entry {
+  display: grid;
+  grid-template-columns: 2.9rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  min-height: 3.45rem;
+  border: 1px solid rgba(121, 192, 255, 0.28);
+  border-radius: 0;
+  background: rgba(5, 8, 70, 0.84);
+  color: #f0f6fc;
+  padding: 0.5rem;
+  text-align: left;
+}
+
+.ship-catalog-list-entry-active {
+  border-color: #f8d878;
+  background: rgba(5, 8, 70, 0.94);
+}
+
+.ship-catalog-list-entry:hover,
+.ship-catalog-list-entry:focus-visible {
+  border-color: #f8d878;
+  filter: brightness(1.12);
+}
+
+.ship-catalog-list-entry strong,
+.ship-catalog-list-entry small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ship-catalog-list-entry strong {
+  color: #f8d878;
+  font-size: 0.92rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.ship-catalog-list-entry small,
+.ship-catalog-sidebar-note {
+  color: #8b949e;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ship-catalog-sidebar-note {
+  margin: 0;
+  align-self: start;
+  line-height: 1.45;
+}
+
+.ship-catalog-sidebar-thumb {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 2.9rem;
+  min-height: 2.6rem;
+  margin-left: -0.25rem;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.ship-catalog-sidebar-thumb img {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  object-fit: contain;
+  transform: translate(calc(-50% + var(--catalog-ship-offset-x, 0px)), calc(-50% + var(--catalog-ship-offset-y, 0px))) scale(var(--catalog-ship-scale));
+  transform-origin: center;
+}
+
+.ship-spec-sheet {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(13rem, 0.3fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 0.65rem;
+  overflow: hidden;
+  border-radius: 14px;
+  padding: 0.75rem;
+}
+
+.ship-spec-header {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: stretch;
+  border: 1px solid rgba(248, 216, 120, 0.3);
+  background: rgba(13, 17, 23, 0.76);
+  padding: 0.65rem 0.75rem;
+}
+
+.ship-spec-header p {
+  margin: 0;
+  color: #c9d1d9;
+}
+
+.ship-spec-header h2 {
+  color: #f0f6fc;
+  font-size: clamp(2rem, 5.5vw, 4.25rem);
+  line-height: 0.92;
+  letter-spacing: 0.08em;
+}
+
+.ship-spec-registry {
+  color: #79c0ff;
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.ship-spec-cost {
+  display: grid;
+  place-items: center;
+  min-width: 7rem;
+  border: 2px solid rgba(121, 192, 255, 0.55);
+  background: rgba(5, 8, 70, 0.86);
+  color: #79c0ff;
+  text-transform: uppercase;
+}
+
+.ship-spec-cost span {
+  font-size: 0.74rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+}
+
+.ship-spec-cost strong {
+  color: #f8d878;
+  font-size: clamp(2rem, 5vw, 3.6rem);
+  line-height: 0.9;
+}
+
+.ship-spec-body {
+  display: contents;
+}
+
+.ship-diagram-panel {
+  position: relative;
+  grid-column: 1;
+  grid-row: 2;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid rgba(121, 192, 255, 0.28);
+  background:
+    radial-gradient(circle at 50% 48%, rgba(121, 192, 255, 0.16), transparent 34%),
+    rgba(2, 4, 13, 0.72);
+}
+
+.ship-diagram-grid {
+  position: absolute;
+  inset: 0;
+  opacity: 0.22;
+  background-image:
+    linear-gradient(rgba(121, 192, 255, 0.18) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(121, 192, 255, 0.18) 1px, transparent 1px);
+  background-size: 2.2rem 2.2rem;
+}
+
+.ship-diagram-art {
+  position: absolute;
+  inset: 8% 8%;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  filter: drop-shadow(0 18px 28px rgba(0, 0, 0, 0.75));
+}
+
+.ship-diagram-art img {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  object-fit: contain;
+  transform: translate(calc(-50% + var(--catalog-ship-offset-x, 0px)), calc(-50% + var(--catalog-ship-offset-y, 0px))) scale(var(--catalog-ship-scale));
+  transform-origin: center;
+}
+
+.ship-diagram-part-cannonade-barrel,
+.ship-diagram-part-zizlik-core {
+  position: relative;
+}
+
+.ship-diagram-part-zizlik-ring {
+  opacity: 0.96;
+}
+
+.ship-callout {
+  position: absolute;
+  z-index: 2;
+  width: min(42%, 15rem);
+  border-top: 2px solid #f8d878;
+  background: rgba(2, 4, 13, 0.72);
+  padding: 0.45rem 0.55rem;
+  color: #c9d1d9;
+}
+
+.ship-callout::after {
+  display: none;
+}
+
+.ship-callout span {
+  display: inline-block;
+  margin-right: 0.35rem;
+  color: #79c0ff;
+  font-weight: 900;
+}
+
+.ship-callout strong {
+  color: #f8d878;
+  font-size: 0.76rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ship-callout p {
+  margin: 0.25rem 0 0;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.ship-callout-upper-left {
+  top: 8%;
+  left: 5%;
+}
+
+.ship-callout-upper-right {
+  top: 10%;
+  right: 5%;
+}
+
+.ship-callout-lower-left {
+  bottom: 9%;
+  left: 6%;
+}
+
+.ship-callout-lower-right {
+  right: 6%;
+  bottom: 8%;
+}
+
+.ship-spec-readout {
+  grid-column: 2;
+  grid-row: 2 / 4;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(12rem, 1fr) auto auto;
+  gap: 0.55rem;
+}
+
+.ship-spec-portrait,
+.ship-spec-readout section {
+  border: 1px solid rgba(139, 148, 158, 0.28);
+  background: rgba(13, 17, 23, 0.76);
+}
+
+.ship-spec-portrait {
+  position: relative;
+  overflow: hidden;
+}
+
+.ship-spec-portrait-main {
+  width: 100%;
+  height: 100%;
+  min-height: 12rem;
+  display: block;
+  object-fit: contain;
+  object-position: center;
+  background: rgba(2, 4, 13, 0.86);
+}
+
+.ship-spec-portrait-pips {
+  position: absolute;
+  right: 0.45rem;
+  bottom: 0.45rem;
+  display: grid;
+  grid-template-columns: repeat(2, 3.1rem);
+  gap: 0.35rem;
+  pointer-events: none;
+}
+
+.ship-spec-portrait-pips figure {
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid rgba(248, 216, 120, 0.72);
+  background: rgba(2, 4, 13, 0.9);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.55);
+}
+
+.ship-spec-portrait-pips img {
+  width: 100%;
+  height: 3.1rem;
+  display: block;
+  object-fit: cover;
+}
+
+.ship-spec-portrait-pips figcaption {
+  overflow: hidden;
+  color: #f8d878;
+  font-size: 0.42rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  padding: 0.18rem 0.12rem;
+  text-align: center;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.ship-spec-readout section {
+  padding: 0.6rem;
+}
+
+.ship-spec-readout h3 {
+  color: #79c0ff;
+  font-size: 0.76rem;
+  letter-spacing: 0.16em;
+}
+
+.ship-spec-readout p {
+  margin: 0.35rem 0 0;
+  color: #c9d1d9;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.ship-spec-readout strong {
+  color: #f8d878;
+}
+
+.ship-spec-footer {
+  grid-column: 1;
+  grid-row: 3;
+  display: grid;
+  min-height: 0;
+}
+
+.ship-spec-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.35rem;
+  margin: 0;
+}
+
+.ship-spec-stats div {
+  display: grid;
+  grid-template-columns: minmax(7rem, 0.46fr) minmax(0, 1fr);
+  gap: 0.45rem;
+  align-items: center;
+  border: 1px solid rgba(139, 148, 158, 0.24);
+  background: rgba(13, 17, 23, 0.72);
+  padding: 0.38rem 0.45rem;
+}
+
+.ship-spec-stats dt {
+  color: #8b949e;
+  font-size: 0.62rem;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.ship-spec-stats dd {
+  margin: 0;
+  color: #f0f6fc;
+  font-weight: 900;
+}
+
+.ship-spec-stat-stack {
+  display: grid;
+  gap: 0.18rem;
+}
+
+.ship-spec-stat-stack-single {
+  gap: 0;
+}
+
+.ship-spec-stat-bar {
+  position: relative;
+  height: 0.72rem;
+  display: block;
+  overflow: hidden;
+  border: 1px solid rgba(121, 192, 255, 0.28);
+  background: rgba(2, 4, 13, 0.84);
+}
+
+.ship-spec-stat-stack-single .ship-spec-stat-bar {
+  height: 1.35rem;
+}
+
+.ship-spec-stat-fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #35d07f, #f8d878);
+}
+
+.ship-spec-stat-bar strong {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  color: #ffffff;
+  font-size: 0.58rem;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  text-shadow:
+    -1px -1px 0 #02040d,
+    1px -1px 0 #02040d,
+    -1px 1px 0 #02040d,
+    1px 1px 0 #02040d,
+    0 0 5px #02040d;
+}
+
+.ship-spec-stat-stack-single .ship-spec-stat-bar strong {
+  font-size: 0.74rem;
+}
+
+.ship-spec-stat-bar strong span {
+  color: #d6e8ff;
+  font-size: 0.48rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .legacy-hud {
@@ -1400,6 +1943,42 @@ button.fleet-slot {
 
   .menu-overlay {
     padding: 0.75rem;
+  }
+
+  .ship-catalog-screen {
+    height: auto;
+    min-height: 100%;
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+
+  .ship-catalog-sidebar {
+    grid-template-rows: auto;
+  }
+
+  .ship-spec-sheet,
+  .ship-spec-footer {
+    grid-template-columns: 1fr;
+  }
+
+  .ship-spec-body {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .ship-diagram-panel,
+  .ship-spec-readout,
+  .ship-spec-footer {
+    grid-column: auto;
+    grid-row: auto;
+  }
+
+  .ship-diagram-panel {
+    min-height: 28rem;
+  }
+
+  .ship-spec-stats {
+    grid-template-columns: 1fr;
   }
 
   .fleet-builder-screen {

@@ -14,12 +14,13 @@ import { CanvasRenderer, hasActiveShipExplosion } from './render/canvasRenderer'
 import { LegacyImageStore, type LegacyImageLoadingProgress, legacyAssets } from './render/legacyAssets';
 import { DEFAULT_MATCH_SHIPS, SHIP_CATALOG, getShipCatalogEntry, type ShipCatalogId } from './ships';
 import { getAiInput, getAiMovementMode, type AiMovementMode } from './sim/ai';
-import type { Fixed } from './sim/fixed';
+import { fixedToNumber, type Fixed } from './sim/fixed';
 import { hashState } from './sim/hash';
-import { createInitialState } from './sim/state';
+import { SHIP_SPECS } from './sim/shipSpecs';
+import { createInitialState, type RoundStartShipOverride } from './sim/state';
 import { isKronBeamHitting, stepGame } from './sim/step';
 import { ANGLE_STEPS, type Angle } from './sim/trig';
-import type { ActorState, GameState, GameplaySettings, ProjectileState, ShipState } from './sim/types';
+import type { ActorState, GameState, GameplaySettings, ProjectileState, ShipCustomState, ShipState } from './sim/types';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) {
@@ -40,12 +41,285 @@ const SPEED_PRESETS = [
   { id: 'high', label: 'High', multiplier: 2 },
 ] as const;
 
+const CATALOG_PREVIEW_SHIP_IDS = ['frog', 'cannonade', 'zizlik', 'voskum', 'pscout', 'kron', 'gooj', 'krab', 'nurtip', 'duk'] as const satisfies readonly ShipCatalogId[];
+const CATALOG_DIAGRAM_SCALE_MULTIPLIER = 2.4;
+const CATALOG_LIST_SCALE_MULTIPLIER = 0.42;
+const FLEET_PICKER_ART_SCALE_MULTIPLIER = 0.50;
+const FLEET_SLOT_ART_SCALE_MULTIPLIER = 0.50;
+
+type CatalogPreviewShipId = (typeof CATALOG_PREVIEW_SHIP_IDS)[number];
+
+interface ShipCatalogStat {
+  readonly label: string;
+  readonly value: number;
+  readonly max: number;
+  readonly display: string;
+  readonly stackedBars?: readonly {
+    readonly label: string;
+    readonly value: number;
+    readonly max: number;
+    readonly display: string;
+  }[];
+}
+
+interface UiShipArtLayer {
+  readonly key: keyof typeof legacyAssets;
+  readonly scale: number;
+  readonly className?: string;
+  readonly offsetX?: number;
+  readonly offsetY?: number;
+}
+
+const SHIP_CATALOG_METADATA: Record<CatalogPreviewShipId, ShipCatalogDisplayMetadata> = {
+  frog: {
+    registryCode: 'SKP-FRG-001',
+    role: 'Charged bubble pressure craft',
+    primaryName: 'Variable Bubble Capacitor',
+    secondaryName: 'Reactive Bubble Shield',
+    callouts: [
+      {
+        index: '01',
+        title: 'Charge-Fed Bubble Projector',
+        body: 'Holding primary banks fuel into a larger bubble; releasing launches the stored charge.',
+        position: 'upper-left',
+      },
+      {
+        index: '02',
+        title: 'Compact Crew Capsule',
+        body: 'Thirty crew units packed into a soft-body hull with encouraging optimism.',
+        position: 'upper-right',
+      },
+      {
+        index: '03',
+        title: 'Variable Power Bladder',
+        body: 'Charge climbs in fuel-fed steps, increasing bubble damage, life span, and radius.',
+        position: 'lower-left',
+      },
+      {
+        index: '04',
+        title: 'One-Hit Guard Membrane',
+        body: 'Secondary coats the hull, reducing the next normal hit before the membrane collapses.',
+        position: 'lower-right',
+      },
+    ],
+  },
+  cannonade: {
+    registryCode: 'SKP-CND-002',
+    role: 'Heavy turret artillery platform',
+    primaryName: 'Independent Heavy Cannon',
+    secondaryName: 'Tracking Return Boomerang',
+    callouts: [
+      {
+        index: '01',
+        title: 'Autonomous Cannon Mount',
+        body: 'Main cannon slews independently from the hull and fires along its own facing.',
+        position: 'upper-left',
+      },
+      {
+        index: '02',
+        title: 'Armored Split Hull',
+        body: 'The chassis separates while the boomerang system is active in the field.',
+        position: 'upper-right',
+      },
+      {
+        index: '03',
+        title: 'High-Yield Cannonball',
+        body: 'Primary fire is expensive and slow to recycle, but lands heavy direct damage.',
+        position: 'lower-left',
+      },
+      {
+        index: '04',
+        title: 'Single Active Boomerang',
+        body: 'Secondary launches one tracking return weapon; reload begins after it clears.',
+        position: 'lower-right',
+      },
+    ],
+  },
+  zizlik: {
+    registryCode: 'SKP-ZZK-003',
+    role: 'Fast node-amplified interceptor',
+    primaryName: 'Vertical Twin Pulse',
+    secondaryName: 'Deployable Side Nodes',
+    callouts: [
+      {
+        index: '01',
+        title: 'Twin-Axis Pulse Core',
+        body: 'Each firing origin emits paired shots vertically, one upward and one downward.',
+        position: 'upper-left',
+      },
+      {
+        index: '02',
+        title: 'Rotating Control Ring',
+        body: 'Very high acceleration and turn speed make the core difficult to pin down.',
+        position: 'upper-right',
+      },
+      {
+        index: '03',
+        title: 'Left and Right Nodes',
+        body: 'Secondary spends a full battery to attach up to two extra firing origins.',
+        position: 'lower-left',
+      },
+      {
+        index: '04',
+        title: 'Fragile Projection Array',
+        body: 'Nodes track beside the ship and are removed independently when struck.',
+        position: 'lower-right',
+      },
+    ],
+  },
+  voskum: {
+    registryCode: 'SKP-VSK-004',
+    role: 'Blink skirmisher',
+    primaryName: 'Offset Scatter Pulse',
+    secondaryName: 'Random Blink Drive',
+    callouts: [
+      {
+        index: '01',
+        title: 'Offset Pulse Port',
+        body: 'Primary shots leave from one of three nearby muzzle offsets while flying forward.',
+        position: 'upper-left',
+      },
+      {
+        index: '02',
+        title: 'Compact Strike Body',
+        body: 'High top speed lets the ship keep pressure while waiting for blink recycle.',
+        position: 'upper-right',
+      },
+      {
+        index: '03',
+        title: 'Blink Vectorizer',
+        body: 'Secondary relocates the ship in a random direction across a fixed jump distance.',
+        position: 'lower-left',
+      },
+      {
+        index: '04',
+        title: 'Teleport Imprint Trail',
+        body: 'The renderer leaves transient green afterimages between old and new positions.',
+        position: 'lower-right',
+      },
+    ],
+  },
+  pscout: {
+    registryCode: 'SKP-PSC-005',
+    role: 'Beacon-guided beam scout',
+    primaryName: 'Tracking Beacon Launcher',
+    secondaryName: 'Beacon Discharge Beam',
+    callouts: [
+      {
+        index: '01',
+        title: 'Ready Beacon Pod',
+        body: 'A loaded beacon is drawn ahead of the hull while primary fire is available.',
+        position: 'upper-left',
+      },
+      {
+        index: '02',
+        title: 'Light Scout Hull',
+        body: 'Low crew and tiny battery are traded for high speed and sharp acceleration.',
+        position: 'upper-right',
+      },
+      {
+        index: '03',
+        title: 'Attached Beacon Stack',
+        body: 'Primary hits attach beacons to the enemy; each one increases beam strength.',
+        position: 'lower-left',
+      },
+      {
+        index: '04',
+        title: 'Column Beam Trigger',
+        body: 'Secondary consumes enemy beacons and fires a delayed vertical beam pulse.',
+        position: 'lower-right',
+      },
+    ],
+  },
+  kron: {
+    registryCode: 'SKP-KRN-006',
+    role: 'Beam-control interceptor',
+    primaryName: 'Forward Pulse Beam',
+    secondaryName: 'Cryo Lock Burst',
+    callouts: [
+      { index: '01', title: 'Forward Beam Lens', body: 'Primary scans straight ahead and damages only while the enemy intersects the beam path.', position: 'upper-left' },
+      { index: '02', title: 'Broad Target Profile', body: 'Large hull radius gives the beam craft presence but makes close passes hazardous.', position: 'upper-right' },
+      { index: '03', title: 'Rapid Pulse Cycle', body: 'Low-cost beam pulses recycle quickly when lined up with the enemy.', position: 'lower-left' },
+      { index: '04', title: 'Cryo Lock Emitter', body: 'Secondary freezes the opposing ship when a target is present.', position: 'lower-right' },
+    ],
+  },
+  gooj: {
+    registryCode: 'SKP-GOJ-007',
+    role: 'Heavy homing ordnance carrier',
+    primaryName: 'Guided Torpedo Cocktail',
+    secondaryName: 'Aft Junk Burst',
+    callouts: [
+      { index: '01', title: 'Guided Cocktail Tube', body: 'Primary launches a slow torpedo with steering toward its target.', position: 'upper-left' },
+      { index: '02', title: 'Massive Hull Plate', body: 'Huge source art renders down to a tiny in-game scale for a broad silhouette.', position: 'upper-right' },
+      { index: '03', title: 'Aft Debris Chute', body: 'Secondary ejects eight randomized junk pieces behind the ship.', position: 'lower-left' },
+      { index: '04', title: 'Long-Lived Junk Field', body: 'Junk pieces drift for a variable lifespan and clutter the pursuit lane.', position: 'lower-right' },
+    ],
+  },
+  krab: {
+    registryCode: 'SKP-KRB-008',
+    role: 'Mode-shifting crab fighter',
+    primaryName: 'Mode-Linked Claw Guns',
+    secondaryName: 'Range Mode Toggle',
+    callouts: [
+      { index: '01', title: 'Short-Range Claw Spread', body: 'Default primary fires a four-shot randomized spread at close range.', position: 'upper-left' },
+      { index: '02', title: 'Alternate Long Hull', body: 'Secondary toggles a faster long-range form with a different ship sprite.', position: 'upper-right' },
+      { index: '03', title: 'Long-Range Needle Shot', body: 'Long mode swaps in a faster straight primary with slower turning.', position: 'lower-left' },
+      { index: '04', title: 'Transform Control Loop', body: 'Mode changes alter movement stats and weapon behavior until toggled again.', position: 'lower-right' },
+    ],
+  },
+  nurtip: {
+    registryCode: 'SKP-NTP-009',
+    role: 'Remote missile and asteroid controller',
+    primaryName: 'Armed Remote Torpedo',
+    secondaryName: 'Orbiting Asteroid Seed',
+    callouts: [
+      { index: '01', title: 'Remote Torpedo Tube', body: 'Primary launches one missile and locks the launcher until release or natural death.', position: 'upper-left' },
+      { index: '02', title: 'Laser Barrel Assembly', body: 'Ready barrels render above the hull when the primary launcher is available.', position: 'upper-right' },
+      { index: '03', title: 'Manual Detonation Link', body: 'Releasing primary detonates the active missile in an area burst.', position: 'lower-left' },
+      { index: '04', title: 'Asteroid Orbit Seed', body: 'Secondary creates orbiting asteroids that spread into rotating slots around the owner.', position: 'lower-right' },
+    ],
+  },
+  duk: {
+    registryCode: 'SKP-DUK-010',
+    role: 'Stunner and missile rack ship',
+    primaryName: 'Ramping Stunner Shot',
+    secondaryName: 'Limited Missile Rack',
+    callouts: [
+      { index: '01', title: 'Stunner Launch Tube', body: 'Primary fires a slightly inaccurate stunner that slows before ramping up.', position: 'upper-left' },
+      { index: '02', title: 'Four-Round Rack', body: 'Missiles are visible on the hull and each secondary shot consumes one rack slot.', position: 'upper-right' },
+      { index: '03', title: 'Freeze-On-Hit Payload', body: 'Stunner hits damage and freeze the target for a short duration.', position: 'lower-left' },
+      { index: '04', title: 'Heavy Missile Payload', body: 'Secondary missiles are limited, costly in cooldown time, and hit hard.', position: 'lower-right' },
+    ],
+  },
+};
+
 type SpeedSetting = (typeof SPEED_PRESETS)[number]['id'];
+
+interface ShipCatalogDisplayMetadata {
+  readonly registryCode: string;
+  readonly role: string;
+  readonly primaryName: string;
+  readonly secondaryName: string;
+  readonly callouts: readonly {
+    readonly index: string;
+    readonly title: string;
+    readonly body: string;
+    readonly position: 'upper-left' | 'upper-right' | 'lower-left' | 'lower-right';
+  }[];
+}
 
 interface FleetShip {
   readonly uid: string;
   readonly catalogId: ShipCatalogId;
   readonly alive: boolean;
+  readonly persistent?: PersistentFleetShipState;
+}
+
+interface PersistentFleetShipState {
+  readonly crew?: number;
+  readonly custom?: ShipCustomState;
+  readonly zizlikNodeSlots?: readonly number[];
+  readonly pscoutBeaconSlots?: readonly number[];
 }
 
 interface BattleSession {
@@ -78,6 +352,7 @@ type MatchOutcome = { readonly kind: 'active' } | { readonly kind: 'winner'; rea
 type AppPhase =
   | { readonly name: 'loading' }
   | { readonly name: 'mainMenu' }
+  | { readonly name: 'shipCatalog' }
   | { readonly name: 'singleBudget' }
   | { readonly name: 'hotseatBudget' }
   | { readonly name: 'fleetBuild'; readonly budget: number; readonly fleet: readonly FleetShip[] }
@@ -143,6 +418,8 @@ let networkDebugSettings: NetworkDebugSettings = {
 let presentationCorrection: PresentationCorrection | null = null;
 let lowGravityEnabled = true;
 let speedSetting: SpeedSetting = 'low';
+let selectedCatalogShipId: CatalogPreviewShipId = 'frog';
+let catalogEntryListScrollTop = 0;
 let suppressPeerDisconnectPopup = false;
 let pauseMenuOpen = false;
 let lastRenderedPhaseName: AppPhase['name'] | null = null;
@@ -870,6 +1147,15 @@ function handleMenuAction(button: HTMLButtonElement): void {
     case 'main-ai-demo':
       startAiDemoRound(1);
       return;
+    case 'main-catalog':
+      catalogEntryListScrollTop = 0;
+      appPhase = { name: 'shipCatalog' };
+      break;
+    case 'catalog-pick':
+      catalogEntryListScrollTop = button.closest<HTMLElement>('.ship-catalog-entry-list')?.scrollTop ?? catalogEntryListScrollTop;
+      selectedCatalogShipId = readCatalogPreviewShipId(button);
+      renderMenu();
+      return;
     case 'main-multi':
       appPhase = { name: 'multiplayerMenu' };
       break;
@@ -977,6 +1263,9 @@ function renderMenu(): void {
     case 'mainMenu':
       menuOverlay.innerHTML = renderMainMenu();
       break;
+    case 'shipCatalog':
+      menuOverlay.innerHTML = renderFrogCatalogMenu();
+      break;
     case 'singleBudget':
       menuOverlay.innerHTML = renderBudgetMenu(
         'Build Single Player Fleet',
@@ -1048,7 +1337,17 @@ function renderMenu(): void {
   if (isShipSelectPhase()) {
     queueShipSelectFocusRestore();
   }
+  if (appPhase.name === 'shipCatalog') {
+    restoreCatalogEntryListScroll();
+  }
   syncAudioControls();
+}
+
+function restoreCatalogEntryListScroll(): void {
+  const list = menuOverlay.querySelector<HTMLElement>('.ship-catalog-entry-list');
+  if (list) {
+    list.scrollTop = catalogEntryListScrollTop;
+  }
 }
 
 function renderLoadingMenu(): string {
@@ -1079,6 +1378,7 @@ function renderMainMenu(): string {
         <button type="button" data-action="main-single">Single Player</button>
         <button type="button" data-action="main-hotseat">Hotseat</button>
         <button type="button" data-action="main-ai-demo">Attract Mode</button>
+        <button type="button" data-action="main-catalog">Ship Catalog</button>
         <button type="button" data-action="main-multi">Multiplayer</button>
         <button class="low-gravity-toggle-button" type="button" data-action="toggle-low-gravity" aria-pressed="${lowGravityEnabled}">${getLowGravityToggleLabel()}</button>
         <div class="speed-control" aria-label="Speed">
@@ -1092,6 +1392,511 @@ function renderMainMenu(): string {
       </div>
     </section>
   `;
+}
+
+function renderFrogCatalogMenu(): string {
+  const ship = getShipCatalogEntry(selectedCatalogShipId);
+  const spec = SHIP_SPECS[selectedCatalogShipId];
+  const metadata = SHIP_CATALOG_METADATA[selectedCatalogShipId];
+  const primaryReadout = getCatalogPrimaryReadout(selectedCatalogShipId);
+  const secondaryReadout = getCatalogSecondaryReadout(selectedCatalogShipId);
+  const turnDegreesPerSecond = turnStepToDegreesPerSecond(spec.turnStep);
+  const fastestTurnDegreesPerSecond = Math.max(...Object.values(SHIP_SPECS).map((shipSpec) => turnStepToDegreesPerSecond(shipSpec.turnStep)));
+  const weaponStats = getCatalogWeaponStats(selectedCatalogShipId);
+  const stats: readonly ShipCatalogStat[] = [
+    { label: 'Crew Complement', value: ship.crew, max: 40, display: String(ship.crew) },
+    { label: 'Fuel Capacity', value: ship.battery, max: 40, display: String(ship.battery) },
+    { label: 'Fuel Regen.', value: 90 - spec.batteryChargeFrames, max: 90, display: `${spec.batteryChargeFrames}f cycle` },
+    { label: 'Acceleration', value: fixedToNumber(spec.accel), max: 0.22, display: formatDecimal(fixedToNumber(spec.accel), 3) },
+    { label: 'Turn Speed', value: turnDegreesPerSecond, max: fastestTurnDegreesPerSecond, display: `${Math.round(turnDegreesPerSecond)} deg/s` },
+    { label: 'Max Velocity', value: fixedToNumber(spec.maxSpeed), max: 5.2, display: formatDecimal(fixedToNumber(spec.maxSpeed), 2) },
+    weaponStats.range,
+    ...weaponStats.damage,
+  ];
+  return `
+    <section
+      class="ship-catalog-screen"
+      style="--catalog-space: url('${legacyAssets.space3.url}');"
+      aria-label="Ship catalog"
+    >
+      <aside class="ship-catalog-sidebar" aria-label="Catalog entries">
+        <p class="menu-kicker">Ship Catalog</p>
+        <h2>Technical Index</h2>
+        <div class="ship-catalog-entry-list">
+          ${CATALOG_PREVIEW_SHIP_IDS.map((shipId) => renderCatalogIndexEntry(shipId)).join('')}
+        </div>
+        <p class="ship-catalog-sidebar-note">Additional vessels pending hazardous materials review.</p>
+        <button type="button" data-action="back">Back</button>
+      </aside>
+
+      <article class="ship-spec-sheet" aria-label="${ship.name} technical poster">
+        <header class="ship-spec-header">
+          <div>
+            <p class="ship-spec-registry">${metadata.registryCode}</p>
+            <h2>${ship.name}</h2>
+            <p>${metadata.role}</p>
+          </div>
+          <div class="ship-spec-cost" aria-label="Point cost">
+            <span>Points</span>
+            <strong>${ship.cost}</strong>
+          </div>
+        </header>
+
+        <div class="ship-spec-body">
+          <section class="ship-diagram-panel" aria-label="${ship.name} diagram">
+            <div class="ship-diagram-grid" aria-hidden="true"></div>
+            ${metadata.callouts.map(renderShipCallout).join('')}
+            ${renderCatalogShipDiagramArt(selectedCatalogShipId)}
+          </section>
+
+          <aside class="ship-spec-readout" aria-label="${ship.name} readout">
+            <div class="ship-spec-portrait">
+              <img class="ship-spec-portrait-main" src="${legacyAssets[ship.hud.portraitKey].url}" alt="${ship.name} portrait" />
+              ${renderCatalogPortraitPips(selectedCatalogShipId)}
+            </div>
+            <section>
+              <h3>Primary</h3>
+              <p><strong>${metadata.primaryName}</strong></p>
+              <p>${primaryReadout}</p>
+            </section>
+            <section>
+              <h3>Secondary</h3>
+              <p><strong>${metadata.secondaryName}</strong></p>
+              <p>${secondaryReadout}</p>
+            </section>
+          </aside>
+        </div>
+
+        <footer class="ship-spec-footer">
+          <dl class="ship-spec-stats">
+            ${stats.map(renderShipCatalogStat).join('')}
+          </dl>
+        </footer>
+      </article>
+    </section>
+  `;
+}
+
+function renderCatalogPortraitPips(shipId: CatalogPreviewShipId): string {
+  if (shipId !== 'pscout') {
+    return '';
+  }
+
+  return `
+    <div class="ship-spec-portrait-pips" aria-label="pScout command portraits">
+      <figure>
+        <img src="${legacyAssets.pscoutPortraitAdmiral.url}" alt="pScout admiral portrait" />
+        <figcaption>Admiral</figcaption>
+      </figure>
+      <figure>
+        <img src="${legacyAssets.pscoutPortraitYgun.url}" alt="pScout carrier portrait" />
+        <figcaption>Carrier</figcaption>
+      </figure>
+    </div>
+  `;
+}
+
+function renderCatalogShipDiagramArt(shipId: CatalogPreviewShipId): string {
+  return renderUiShipArt(shipId, 'ship-diagram-art', CATALOG_DIAGRAM_SCALE_MULTIPLIER);
+}
+
+function renderCatalogShipListArt(shipId: CatalogPreviewShipId): string {
+  return renderUiShipArt(shipId, 'ship-catalog-sidebar-thumb', CATALOG_LIST_SCALE_MULTIPLIER);
+}
+
+function renderUiShipArt(shipId: ShipCatalogId, className: string, scaleMultiplier: number): string {
+  const ship = getShipCatalogEntry(shipId);
+  const layers = getUiShipLayers(shipId, scaleMultiplier);
+  return `
+    <div class="ui-ship-art ${className}">
+      ${layers
+        .map(
+          (layer, index) =>
+            `<img
+              class="${layer.className ?? ''}"
+              src="${legacyAssets[layer.key].url}"
+              alt="${index === 0 ? `${ship.name} ship` : ''}"
+              ${index === 0 ? '' : 'aria-hidden="true"'}
+              style="--catalog-ship-scale: ${layer.scale}; --catalog-ship-offset-x: ${layer.offsetX ?? 0}px; --catalog-ship-offset-y: ${layer.offsetY ?? 0}px;"
+            />`,
+        )
+        .join('')}
+    </div>
+  `;
+}
+
+function getUiShipLayers(shipId: ShipCatalogId, scaleMultiplier: number): readonly UiShipArtLayer[] {
+  const ship = getShipCatalogEntry(shipId);
+  const scale = ship.render.scale * scaleMultiplier;
+  switch (shipId) {
+    case 'frog':
+      return [{ key: 'frogShip', scale }];
+    case 'cannonade':
+      return [
+        { key: 'cannonadeBase', scale },
+        { key: 'cannonadeBarrel', scale, className: 'ship-diagram-part-cannonade-barrel' },
+      ];
+    case 'zizlik':
+      return [
+        { key: 'zizlikRing', scale, className: 'ship-diagram-part-zizlik-ring' },
+        { key: 'zizlikCore', scale, className: 'ship-diagram-part-zizlik-core' },
+      ];
+    case 'voskum':
+      return [{ key: 'voskumShip', scale }];
+    case 'pscout':
+      return [
+        { key: 'pscoutBeacon', scale: scaleMultiplier, offsetX: -15 * scaleMultiplier },
+        { key: 'pscoutShip', scale },
+      ];
+    case 'kron':
+      return [{ key: 'kronShip', scale }];
+    case 'gooj':
+      return [{ key: 'goojShip', scale }];
+    case 'krab':
+      return [
+        { key: 'krabShip2', scale, offsetX: -34 * scaleMultiplier },
+        { key: 'krabShip', scale, offsetX: 34 * scaleMultiplier },
+      ];
+    case 'nurtip':
+      return [
+        { key: 'nurtipShip', scale },
+        { key: 'nurtipBarrel1', scale: scale * 1.1, offsetY: -17.25 * scaleMultiplier },
+      ];
+    case 'duk':
+      return [
+        { key: 'dukShip', scale },
+        { key: 'dukMissile', scale, offsetX: -25 * scaleMultiplier },
+        { key: 'dukMissile', scale, offsetX: -13 * scaleMultiplier },
+        { key: 'dukMissile', scale, offsetX: 13 * scaleMultiplier },
+        { key: 'dukMissile', scale, offsetX: 25 * scaleMultiplier },
+      ];
+  }
+}
+
+function renderCatalogIndexEntry(shipId: CatalogPreviewShipId): string {
+  const ship = getShipCatalogEntry(shipId);
+  const metadata = SHIP_CATALOG_METADATA[shipId];
+  const active = shipId === selectedCatalogShipId;
+  return `
+    <button
+      class="ship-catalog-list-entry${active ? ' ship-catalog-list-entry-active' : ''}"
+      type="button"
+      data-action="catalog-pick"
+      data-ship-id="${shipId}"
+      aria-pressed="${active}"
+    >
+      ${renderCatalogShipListArt(shipId)}
+      <span>
+        <strong>${ship.name}</strong>
+        <small>${metadata.registryCode}</small>
+      </span>
+    </button>
+  `;
+}
+
+function getCatalogPrimaryReadout(shipId: CatalogPreviewShipId): string {
+  const spec = SHIP_SPECS[shipId];
+  switch (shipId) {
+    case 'frog': {
+      const maxCharge = 8;
+      const chargeInterval = 50;
+      return `Hold primary to charge: 1 fuel every ${chargeInterval}f, up to ${maxCharge} charge. Releasing fires the stored bubble and starts a ${spec.primary.framesPerShot}f recycle.`;
+    }
+    case 'cannonade':
+      return `Fires from the independent cannon angle. Costs ${spec.primary.cost} fuel and recycles in ${spec.primary.framesPerShot}f.`;
+    case 'zizlik':
+      return `Each active origin fires one shot upward and one downward. Costs ${spec.primary.cost} fuel and recycles in ${spec.primary.framesPerShot}f.`;
+    case 'voskum':
+      return `Fires from one of three nearby muzzle offsets. Costs ${spec.primary.cost} fuel and recycles quickly in ${spec.primary.framesPerShot}f.`;
+    case 'pscout':
+      return `Launches a beacon that attaches to the enemy on hit. Costs ${spec.primary.cost} fuel and recycles in ${spec.primary.framesPerShot}f.`;
+    case 'kron':
+      return `Projects a short forward beam scan while firing. Costs ${spec.primary.cost} fuel, recycles in ${spec.primary.framesPerShot}f, and only hits targets crossing the beam path.`;
+    case 'gooj':
+      return `Launches a guided cocktail torpedo from a random nearby muzzle offset. Costs ${spec.primary.cost} fuel and recycles in ${spec.primary.framesPerShot}f.`;
+    case 'krab':
+      return `Default mode fires four randomized close-range shots; long mode fires one faster straight shot. Both cost ${spec.primary.cost} fuel.`;
+    case 'nurtip':
+      return `Launches one remote torpedo for ${spec.primary.cost} fuel. The launcher stays armed until the missile is released, hits, expires, or is detonated.`;
+    case 'duk':
+      return `Fires a slightly inaccurate stunner for ${spec.primary.cost} fuel. It starts nearly inert, ramps up over time, and briefly freezes on hit.`;
+  }
+}
+
+function getCatalogSecondaryReadout(shipId: CatalogPreviewShipId): string {
+  const spec = SHIP_SPECS[shipId];
+  switch (shipId) {
+    case 'frog':
+      return `Costs ${spec.secondary.cost} fuel and arms a shield membrane. The next non-piercing hit is reduced, then the shield is consumed. Recycles in ${spec.secondary.framesPerShot}f.`;
+    case 'cannonade':
+      return `Launches one active tracking boomerang. Costs ${spec.secondary.cost} fuel and reloads after the active boomerang clears.`;
+    case 'zizlik':
+      return `Costs ${spec.secondary.cost} fuel to attach a side node, first right then left. Recycles in ${spec.secondary.framesPerShot}f, and each node can be destroyed independently.`;
+    case 'voskum':
+      return `Costs ${spec.secondary.cost} fuel to blink in a random direction. Recycles in ${spec.secondary.framesPerShot}f and leaves a short teleport-imprint visual trail.`;
+    case 'pscout':
+      return `Costs ${spec.secondary.cost} fuel and requires at least one enemy beacon. Consumes all enemy beacons, then applies beam damage after a short delay.`;
+    case 'kron':
+      return `Costs ${spec.secondary.cost} fuel and freezes the enemy ship when one is alive. Recycles in ${spec.secondary.framesPerShot}f.`;
+    case 'gooj':
+      return `Costs ${spec.secondary.cost} fuel to dump eight junk projectiles from the aft chute. Each piece gets randomized speed, angle, variety, and lifespan.`;
+    case 'krab':
+      return `Costs ${spec.secondary.cost} fuel to toggle between short-spread mode and long-range mode. Movement stats and primary fire swap immediately.`;
+    case 'nurtip':
+      return `Costs ${spec.secondary.cost} fuel to seed an orbiting asteroid. Asteroids drift outward, then settle into rotating slots around the ship.`;
+    case 'duk': {
+      const missileCount = 4;
+      return `Costs ${spec.secondary.cost} fuel to launch one rack missile, with ${missileCount} missiles available per ship. Recycles in ${spec.secondary.framesPerShot}f.`;
+    }
+  }
+}
+
+function getCatalogWeaponStats(shipId: CatalogPreviewShipId): {
+  readonly range: ShipCatalogStat;
+  readonly damage: readonly ShipCatalogStat[];
+} {
+  const spec = SHIP_SPECS[shipId];
+  switch (shipId) {
+    case 'frog': {
+      const maxCharge = 8;
+      const baseRange = fixedToNumber(spec.primary.speed) * spec.primary.ttl;
+      const maxRange = fixedToNumber(spec.primary.speed) * (spec.primary.ttl + 6 * maxCharge);
+      return {
+        range: { label: 'Weapon Range', value: maxRange, max: 2200, display: `${Math.round(baseRange)}-${Math.round(maxRange)}u` },
+        damage: [{ label: 'Weapon Damage', value: maxCharge, max: 8, display: `${spec.primary.damage}-${maxCharge}` }],
+      };
+    }
+    case 'cannonade': {
+      const primaryRange = fixedToNumber(spec.primary.speed) * spec.primary.ttl;
+      const secondaryRange = fixedToNumber(spec.secondary.speed) * spec.secondary.ttl;
+      return {
+        range: {
+          label: 'Weapon Range',
+          value: Math.max(primaryRange, secondaryRange),
+          max: 3000,
+          display: `${Math.round(primaryRange)} / ${Math.round(secondaryRange)}u`,
+          stackedBars: [
+            { label: 'Primary', value: primaryRange, max: 3000, display: `${Math.round(primaryRange)}u` },
+            { label: 'Secondary', value: secondaryRange, max: 3000, display: `${Math.round(secondaryRange)}u` },
+          ],
+        },
+        damage: [
+          {
+            label: 'Weapon Damage',
+            value: spec.primary.damage,
+            max: 8,
+            display: `${spec.primary.damage} / ${spec.secondary.damage}`,
+            stackedBars: [
+              { label: 'Primary', value: spec.primary.damage, max: 8, display: String(spec.primary.damage) },
+              { label: 'Secondary', value: spec.secondary.damage, max: 8, display: String(spec.secondary.damage) },
+            ],
+          },
+        ],
+      };
+    }
+    case 'zizlik': {
+      const range = fixedToNumber(spec.primary.speed) * spec.primary.ttl;
+      const maxVolleyDamage = spec.primary.damage * 6;
+      return {
+        range: { label: 'Weapon Range', value: range, max: 2200, display: `${Math.round(range)}u` },
+        damage: [{ label: 'Volley Damage', value: maxVolleyDamage, max: 8, display: `2-6 x ${spec.primary.damage}` }],
+      };
+    }
+    case 'voskum': {
+      const range = fixedToNumber(spec.primary.speed) * spec.primary.ttl;
+      return {
+        range: { label: 'Weapon Range', value: range, max: 2200, display: `${Math.round(range)}u` },
+        damage: [{ label: 'Weapon Damage', value: spec.primary.damage, max: 8, display: String(spec.primary.damage) }],
+      };
+    }
+    case 'pscout': {
+      const range = fixedToNumber(spec.primary.speed) * spec.primary.ttl;
+      return {
+        range: { label: 'Beacon Range', value: range, max: 2200, display: `${Math.round(range)}u` },
+        damage: [{ label: 'Beam Damage', value: 4, max: 8, display: 'beacons^2' }],
+      };
+    }
+    case 'kron': {
+      const beamRange = 32 * 10;
+      return {
+        range: { label: 'Beam Reach', value: beamRange, max: 2200, display: `${beamRange}u scan` },
+        damage: [{ label: 'Weapon Damage', value: spec.primary.damage, max: 8, display: String(spec.primary.damage) }],
+      };
+    }
+    case 'gooj': {
+      const primaryRange = fixedToNumber(spec.primary.speed) * spec.primary.ttl;
+      const secondaryRange = fixedToNumber(spec.secondary.speed) * spec.secondary.ttl;
+      return {
+        range: {
+          label: 'Weapon Range',
+          value: Math.max(primaryRange, secondaryRange),
+          max: 2200,
+          display: `${Math.round(primaryRange)} / ${Math.round(secondaryRange)}u`,
+          stackedBars: [
+            { label: 'Primary', value: primaryRange, max: 2200, display: `${Math.round(primaryRange)}u` },
+            { label: 'Junk', value: secondaryRange, max: 2200, display: `${Math.round(secondaryRange)}u+` },
+          ],
+        },
+        damage: [
+          {
+            label: 'Weapon Damage',
+            value: 8,
+            max: 8,
+            display: `${spec.primary.damage} / 8 x ${spec.secondary.damage}`,
+            stackedBars: [
+              { label: 'Primary', value: spec.primary.damage, max: 8, display: String(spec.primary.damage) },
+              { label: 'Junk', value: 8 * spec.secondary.damage, max: 8, display: `8 x ${spec.secondary.damage}` },
+            ],
+          },
+        ],
+      };
+    }
+    case 'krab': {
+      const shortRange = fixedToNumber(spec.primary.speed) * spec.primary.ttl;
+      const longPrimary = spec.longRange?.primary ?? spec.primary;
+      const longRange = fixedToNumber(longPrimary.speed) * longPrimary.ttl;
+      return {
+        range: {
+          label: 'Weapon Range',
+          value: Math.max(shortRange, longRange),
+          max: 2200,
+          display: `${Math.round(shortRange)} / ${Math.round(longRange)}u`,
+          stackedBars: [
+            { label: 'Short', value: shortRange, max: 2200, display: `${Math.round(shortRange)}u` },
+            { label: 'Long', value: longRange, max: 2200, display: `${Math.round(longRange)}u` },
+          ],
+        },
+        damage: [
+          {
+            label: 'Volley Damage',
+            value: 4 * spec.primary.damage,
+            max: 8,
+            display: `4 x ${spec.primary.damage} / ${longPrimary.damage}`,
+            stackedBars: [
+              { label: 'Short', value: 4 * spec.primary.damage, max: 8, display: `4 x ${spec.primary.damage}` },
+              { label: 'Long', value: longPrimary.damage, max: 8, display: String(longPrimary.damage) },
+            ],
+          },
+        ],
+      };
+    }
+    case 'nurtip': {
+      const primaryRange = fixedToNumber(spec.primary.speed) * spec.primary.ttl;
+      const asteroidReach = 140;
+      return {
+        range: {
+          label: 'Weapon Range',
+          value: primaryRange,
+          max: 3600,
+          display: `${Math.round(primaryRange)}u / ${asteroidReach}u orbit`,
+          stackedBars: [
+            { label: 'Missile', value: primaryRange, max: 3600, display: `${Math.round(primaryRange)}u` },
+            { label: 'Asteroid', value: asteroidReach, max: 3600, display: `${asteroidReach}u orbit` },
+          ],
+        },
+        damage: [
+          {
+            label: 'Weapon Damage',
+            value: spec.primary.damage,
+            max: 8,
+            display: `${spec.primary.damage} / 2 AOE / ${spec.secondary.damage}`,
+            stackedBars: [
+              { label: 'Hit', value: spec.primary.damage, max: 8, display: String(spec.primary.damage) },
+              { label: 'Detonate', value: 2, max: 8, display: '2 AOE' },
+              { label: 'Asteroid', value: spec.secondary.damage, max: 8, display: String(spec.secondary.damage) },
+            ],
+          },
+        ],
+      };
+    }
+    case 'duk': {
+      const primaryRange = estimateDukStunnerRange(fixedToNumber(spec.primary.speed), spec.primary.ttl);
+      const secondaryRange = fixedToNumber(spec.secondary.speed) * spec.secondary.ttl;
+      return {
+        range: {
+          label: 'Weapon Range',
+          value: Math.max(primaryRange, secondaryRange),
+          max: 3000,
+          display: `${Math.round(primaryRange)} / ${Math.round(secondaryRange)}u`,
+          stackedBars: [
+            { label: 'Stunner', value: primaryRange, max: 3000, display: `~${Math.round(primaryRange)}u ramp` },
+            { label: 'Missile', value: secondaryRange, max: 3000, display: `${Math.round(secondaryRange)}u` },
+          ],
+        },
+        damage: [
+          {
+            label: 'Weapon Damage',
+            value: spec.secondary.damage,
+            max: 10,
+            display: `${spec.primary.damage} / ${spec.secondary.damage}`,
+            stackedBars: [
+              { label: 'Stunner', value: spec.primary.damage, max: 10, display: `${spec.primary.damage}+freeze` },
+              { label: 'Missile', value: spec.secondary.damage, max: 10, display: String(spec.secondary.damage) },
+            ],
+          },
+        ],
+      };
+    }
+  }
+}
+
+function renderShipCallout(callout: ShipCatalogDisplayMetadata['callouts'][number]): string {
+  return `
+    <div class="ship-callout ship-callout-${callout.position}">
+      <span>${callout.index}</span>
+      <strong>${callout.title}</strong>
+      <p>${callout.body}</p>
+    </div>
+  `;
+}
+
+function estimateDukStunnerRange(speed: number, ttl: number): number {
+  const muzzleSpeedScale = 0.8;
+  const slowTtl = 700;
+  const rampFrames = 300;
+  const legacyLifeDecay = 3;
+  let range = 0;
+
+  for (let remainingTtl = ttl - legacyLifeDecay; remainingTtl > slowTtl; remainingTtl -= legacyLifeDecay) {
+    const lifeAboveSlow = Math.min(remainingTtl, slowTtl + rampFrames) - slowTtl;
+    const thrustRatio = Math.max(0, 1 - (0.00333 * (rampFrames - lifeAboveSlow)) ** 2);
+    range += speed * muzzleSpeedScale * thrustRatio;
+  }
+
+  return range;
+}
+
+function renderShipCatalogStat(stat: ShipCatalogStat): string {
+  const bars = stat.stackedBars?.map(renderShipCatalogStatBar).join('') ?? renderShipCatalogStatBar(stat);
+  return `
+    <div>
+      <dt>${stat.label}</dt>
+      <dd>
+        <span class="${stat.stackedBars ? 'ship-spec-stat-stack' : 'ship-spec-stat-stack ship-spec-stat-stack-single'}">
+          ${bars}
+        </span>
+      </dd>
+    </div>
+  `;
+}
+
+function renderShipCatalogStatBar(stat: { readonly label?: string; readonly value: number; readonly max: number; readonly display: string }): string {
+  const fill = Math.max(6, Math.min(100, Math.round((stat.value / stat.max) * 100)));
+  const label = stat.label ? `<span>${stat.label}</span>` : '';
+  return `
+    <span class="ship-spec-stat-bar">
+      <span class="ship-spec-stat-fill" style="width: ${fill}%"></span>
+      <strong>${label}${stat.display}</strong>
+    </span>
+  `;
+}
+
+function formatDecimal(value: number, digits: number): string {
+  return value.toFixed(digits).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function turnStepToDegreesPerSecond(turnStep: Fixed): number {
+  return (fixedToNumber(turnStep) / ANGLE_STEPS) * 360 * SIM_FPS;
 }
 
 function getGameplaySettings(): GameplaySettings {
@@ -1404,7 +2209,7 @@ function renderFleetSlot(index: number, fleetShip: FleetShip | undefined, isEdit
     return `
       <div class="fleet-slot fleet-slot-filled fleet-slot-readonly" aria-label="${ship.name} in slot ${index + 1}">
         <span class="fleet-slot-number">${index + 1}</span>
-        ${renderShipThumb(fleetShip.catalogId, 'fleet-slot-ship')}
+        ${renderUiShipArt(fleetShip.catalogId, 'fleet-slot-ship', FLEET_SLOT_ART_SCALE_MULTIPLIER)}
         <span class="fleet-slot-name">${ship.name}</span>
         <span class="fleet-slot-cost">${ship.cost}</span>
       </div>
@@ -1423,7 +2228,7 @@ function renderFleetSlot(index: number, fleetShip: FleetShip | undefined, isEdit
       aria-label="Remove ${ship.name} from slot ${index + 1}"
     >
       <span class="fleet-slot-number">${index + 1}</span>
-      ${renderShipThumb(fleetShip.catalogId, 'fleet-slot-ship')}
+      ${renderUiShipArt(fleetShip.catalogId, 'fleet-slot-ship', FLEET_SLOT_ART_SCALE_MULTIPLIER)}
       <span class="fleet-slot-name">${ship.name}</span>
       <span class="fleet-slot-cost">${ship.cost}</span>
     </button>
@@ -1452,26 +2257,17 @@ function renderCatalogCard(shipId: ShipCatalogId, remaining: number, catalogInde
       data-fleet-nav-index="${catalogIndex}"
       ${disabled}
     >
-      ${renderShipThumb(ship.id, 'fleet-catalog-ship')}
+      ${renderFleetPickerShipArt(ship.id)}
       <div>
         <h3>${ship.name}</h3>
-        <p>${ship.cost} pts</p>
       </div>
+      <p class="fleet-picker-ship-cost">${ship.cost}</p>
     </button>
   `;
 }
 
-function renderShipThumb(shipId: ShipCatalogId, className: string): string {
-  const ship = getShipCatalogEntry(shipId);
-  const overlay = ship.hud.shipOverlayKey
-    ? `<img class="fleet-ship-overlay" src="${legacyAssets[ship.hud.shipOverlayKey].url}" alt="" aria-hidden="true" />`
-    : '';
-  return `
-    <div class="fleet-ship-thumb ${className}" style="--fleet-ship-scale: ${ship.hud.shipScale};">
-      <img src="${legacyAssets[ship.hud.shipKey].url}" alt="${ship.name} ship" />
-      ${overlay}
-    </div>
-  `;
+function renderFleetPickerShipArt(shipId: ShipCatalogId): string {
+  return renderUiShipArt(shipId, 'fleet-picker-catalog-art', FLEET_PICKER_ART_SCALE_MULTIPLIER);
 }
 
 function isFleetBuilderPhase(): boolean {
@@ -2202,7 +2998,7 @@ function renderShipSelectFleetSlot(
   const label = fleetShip.alive ? `Fight with ${ship.name} from slot ${index + 1}` : `${ship.name} in slot ${index + 1} was defeated`;
   const content = `
     <span class="fleet-slot-number">${index + 1}</span>
-    ${renderShipThumb(fleetShip.catalogId, 'fleet-slot-ship')}
+    ${renderUiShipArt(fleetShip.catalogId, 'fleet-slot-ship', FLEET_SLOT_ART_SCALE_MULTIPLIER)}
     <span class="fleet-slot-name">${ship.name}</span>
     <span class="fleet-slot-cost">${ship.cost}</span>
     ${defeatedOverlay}
@@ -2625,7 +3421,7 @@ function startLocalFight(session: BattleSession): void {
   currentLoadout = [playerShip.catalogId, opponentShip.catalogId];
   renderer.setShipLoadout(currentLoadout);
   renderHud(currentLoadout);
-  state = createInitialState(Date.now() >>> 0, currentLoadout, getGameplaySettings());
+  state = createInitialState(Date.now() >>> 0, currentLoadout, getGameplaySettings(), createRoundStartOverrides(session));
   appPhase = { name: 'fighting', session, handledWinnerId: null };
   renderMenu();
 }
@@ -2648,17 +3444,84 @@ function startHotseatFight(session: BattleSession): void {
   currentLoadout = [playerOneShip.catalogId, playerTwoShip.catalogId];
   renderer.setShipLoadout(currentLoadout);
   renderHud(currentLoadout);
-  state = createInitialState(Date.now() >>> 0, currentLoadout, getGameplaySettings());
+  state = createInitialState(Date.now() >>> 0, currentLoadout, getGameplaySettings(), createRoundStartOverrides(session));
   appPhase = { name: 'hotseatFighting', session, handledWinnerId: null };
   renderMenu();
 }
 
+function createRoundStartOverrides(session: BattleSession): readonly [RoundStartShipOverride | undefined, RoundStartShipOverride | undefined] {
+  return [createRoundStartOverride(getSelectedFleetShip(session, 0)), createRoundStartOverride(getSelectedFleetShip(session, 1))];
+}
+
+function createRoundStartOverride(fleetShip: FleetShip | null): RoundStartShipOverride | undefined {
+  if (!fleetShip?.persistent) {
+    return undefined;
+  }
+
+  return {
+    crew: fleetShip.persistent.crew,
+    custom: fleetShip.persistent.custom,
+    zizlikNodeSlots: fleetShip.persistent.zizlikNodeSlots,
+    pscoutBeaconSlots: fleetShip.persistent.pscoutBeaconSlots,
+  };
+}
+
+function persistRoundFleetState(
+  session: BattleSession,
+  eliminatedSideIds: ReadonlySet<number>,
+): [readonly FleetShip[], readonly FleetShip[]] {
+  return session.fleets.map((fleet, sideId) => {
+    const selectedUid = session.selectedShipUids[sideId];
+    if (!selectedUid) {
+      return fleet;
+    }
+
+    return fleet.map((fleetShip) => {
+      if (fleetShip.uid !== selectedUid) {
+        return fleetShip;
+      }
+
+      if (eliminatedSideIds.has(sideId)) {
+        return { ...fleetShip, alive: false, persistent: undefined };
+      }
+
+      const roundShip = state.ships[sideId];
+      if (!roundShip?.alive) {
+        return { ...fleetShip, alive: false, persistent: undefined };
+      }
+
+      return { ...fleetShip, persistent: createPersistentFleetShipState(roundShip, state.actors) };
+    });
+  }) as [readonly FleetShip[], readonly FleetShip[]];
+}
+
+function createPersistentFleetShipState(ship: ShipState, actors: readonly ActorState[]): PersistentFleetShipState {
+  return {
+    crew: ship.crew,
+    custom: createPersistentCustomState(ship),
+    zizlikNodeSlots: actors
+      .filter((actor) => actor.active && actor.kind === 'zizlikNode' && actor.ownerId === ship.id)
+      .map((actor) => actor.slot),
+    pscoutBeaconSlots: actors
+      .filter((actor) => actor.active && actor.kind === 'pscoutBeacon' && actor.ownerId === ship.id)
+      .map((actor) => actor.slot),
+  };
+}
+
+function createPersistentCustomState(ship: ShipState): ShipCustomState {
+  switch (ship.shipId) {
+    case 'duk':
+      return { dukMissileCount: ship.custom.dukMissileCount };
+    case 'krab':
+      return { krabLongRange: ship.custom.krabLongRange };
+    default:
+      return {};
+  }
+}
+
 function resolveLocalRound(session: BattleSession, winnerId: number): void {
   const loserId = winnerId === 0 ? 1 : 0;
-  const loserShipUid = session.selectedShipUids[loserId];
-  const nextFleets = session.fleets.map((fleet, sideId) =>
-    sideId === loserId ? fleet.map((ship) => (ship.uid === loserShipUid ? { ...ship, alive: false } : ship)) : fleet,
-  ) as [readonly FleetShip[], readonly FleetShip[]];
+  const nextFleets = persistRoundFleetState(session, new Set([loserId]));
   const nextSession: BattleSession = {
     ...session,
     fleets: nextFleets,
@@ -2685,11 +3548,7 @@ function resolveLocalRound(session: BattleSession, winnerId: number): void {
 }
 
 function resolveLocalMutualDestruction(session: BattleSession): void {
-  const eliminated = new Set(session.selectedShipUids.filter((uid): uid is string => uid !== null));
-  const nextFleets: [readonly FleetShip[], readonly FleetShip[]] = [
-    session.fleets[0].map((ship) => (eliminated.has(ship.uid) ? { ...ship, alive: false } : ship)),
-    session.fleets[1].map((ship) => (eliminated.has(ship.uid) ? { ...ship, alive: false } : ship)),
-  ];
+  const nextFleets = persistRoundFleetState(session, new Set([0, 1]));
   const nextSession: BattleSession = {
     ...session,
     fleets: nextFleets,
@@ -3467,6 +4326,7 @@ function leaveMatch(): void {
 
 function goBack(): void {
   switch (appPhase.name) {
+    case 'shipCatalog':
     case 'singleBudget':
     case 'hotseatBudget':
       appPhase = { name: 'mainMenu' };
@@ -3547,6 +4407,8 @@ function formatPhaseStatus(): string {
       return 'Loading assets';
     case 'mainMenu':
       return 'Main menu';
+    case 'shipCatalog':
+      return 'Ship catalog';
     case 'singleBudget':
     case 'fleetBuild':
     case 'shipSelect':
@@ -4129,6 +4991,19 @@ function readShipId(button: HTMLButtonElement): ShipCatalogId {
   }
 
   return shipId;
+}
+
+function readCatalogPreviewShipId(button: HTMLButtonElement): CatalogPreviewShipId {
+  const shipId = button.dataset.shipId;
+  if (!isCatalogPreviewShipId(shipId)) {
+    throw new Error(`Invalid catalog preview ship id: ${shipId}`);
+  }
+
+  return shipId;
+}
+
+function isCatalogPreviewShipId(shipId: string | undefined): shipId is CatalogPreviewShipId {
+  return CATALOG_PREVIEW_SHIP_IDS.some((catalogShipId) => catalogShipId === shipId);
 }
 
 function isShipCatalogId(shipId: string | undefined): shipId is ShipCatalogId {

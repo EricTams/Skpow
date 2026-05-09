@@ -68,6 +68,8 @@ function mixShip(hash: number, ship: ShipState): number {
   for (const angle of ship.custom.voskumTeleportAngles ?? []) {
     next = mix(next, angle);
   }
+  next = mix(next, ship.custom.nurtipPrimaryArmed ? 1 : 0);
+  next = mix(next, ship.custom.dukMissileCount ?? 0);
   return next;
 }
 

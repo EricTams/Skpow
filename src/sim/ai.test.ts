@@ -260,6 +260,28 @@ describe('reference-style AI input', () => {
     expect(input & InputBits.FireSecondary).toBe(0);
   });
 
+  it('fires Duk secondary when aimed with missiles in the rack', () => {
+    const state = withShips(createInitialState(123, ['frog', 'duk']), [
+      { id: 0, x: fixedFromInt(700), y: fixedFromInt(0), angle: angle(128), vx: fixed(0), vy: fixed(0) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), battery: 16, custom: { dukMissileCount: 2 } },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FireSecondary).toBe(InputBits.FireSecondary);
+  });
+
+  it('holds Duk secondary when the rack is empty', () => {
+    const state = withShips(createInitialState(123, ['frog', 'duk']), [
+      { id: 0, x: fixedFromInt(700), y: fixedFromInt(0), angle: angle(128), vx: fixed(0), vy: fixed(0) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), battery: 16, custom: { dukMissileCount: 0 } },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FireSecondary).toBe(0);
+  });
+
   it('holds the frog fire button (charging) when not yet aimed at the enemy', () => {
     const state = withShips(createInitialState(123, ['cannonade', 'frog']), [
       { id: 0, x: fixedFromInt(0), y: fixedFromInt(400), angle: angle(0) },

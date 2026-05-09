@@ -297,7 +297,10 @@ export class CanvasRenderer {
         this.drawKrabShip(ship, camera, x, y, spriteRadians);
         break;
       case 'nurtip':
-        this.drawNurtipShip(ship, camera, x, y, angleRadians, spriteRadians);
+        this.drawNurtipShip(ship, camera, x, y, spriteRadians);
+        break;
+      case 'duk':
+        this.drawDukShip(ship, camera, x, y, angleRadians, spriteRadians);
         break;
       default:
         this.drawGenericShip(ship, camera, x, y, spriteRadians);
@@ -408,22 +411,90 @@ export class CanvasRenderer {
     camera: LegacyCamera,
     x: number,
     y: number,
-    angleRadians: number,
     spriteRadians: number,
   ): void {
     this.drawSimpleShip(ship, camera, x, y, spriteRadians, 'nurtipShip', 0.6);
 
-    // Reference Nurtip::Draw alternates two barrel sprites while a primary missile is ready/in-flight.
+    // Reference Nurtip::Draw places this in the ship's local frame before rotation.
     const primaryReady = ship.alive && ship.primaryCooldown === 0 && ship.battery >= 6;
-    const primaryArmed = Boolean(ship.custom.nurtipPrimaryArmed);
-    if (primaryReady || primaryArmed) {
+    if (primaryReady && !ship.custom.nurtipPrimaryArmed) {
       const barrelKey: LegacyAssetKey = (ship.id + ship.angle) % 2 === 0 ? 'nurtipBarrel1' : 'nurtipBarrel2';
-      const offset = 18 * camera.scale;
-      const offsetX = Math.cos(angleRadians) * offset;
-      const offsetY = Math.sin(angleRadians) * offset;
-      const alpha = primaryArmed ? 0.6 : 1;
-      this.drawSpriteAt(barrelKey, x + offsetX, y + offsetY, spriteRadians, camera.scale * 0.6, alpha);
+      this.drawNurtipPrimaryOverlay(barrelKey, x, y, spriteRadians, camera.scale * 0.6 * 1.1);
     }
+  }
+
+  private drawNurtipPrimaryOverlay(key: LegacyAssetKey, x: number, y: number, radians: number, scale: number): void {
+    const image = this.images.getLoaded(key);
+    if (!image) {
+      return;
+    }
+
+    const ctx = this.context;
+    const drawWidth = image.naturalWidth * scale;
+    const drawHeight = image.naturalHeight * scale;
+    const localOffsetY = -0.45 * image.naturalHeight * scale;
+
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(radians);
+    ctx.drawImage(image, -drawWidth / 2, localOffsetY - drawHeight / 2, drawWidth, drawHeight);
+    ctx.restore();
+  }
+
+  private drawDukShip(
+    ship: ShipState,
+    camera: LegacyCamera,
+    x: number,
+    y: number,
+    angleRadians: number,
+    spriteRadians: number,
+  ): void {
+    const alpha = ship.alive ? 1 : 0.35;
+    const hullDrawn = this.drawSpriteAt('dukShip', x, y, spriteRadians, camera.scale * 0.6, alpha);
+    if (!hullDrawn) {
+      this.drawFallbackAt(ship, x, y, spriteRadians, camera.scale, alpha);
+    }
+
+    const missileCount = Math.max(0, ship.custom.dukMissileCount ?? 0);
+    const rackOffsets = [25, 13, -13, -25];
+    for (let index = 0; index < Math.min(missileCount, rackOffsets.length); index += 1) {
+      const offset = rackOffsets[index];
+      const offsetX = Math.cos(angleRadians + Math.PI / 2) * offset * camera.scale;
+      const offsetY = Math.sin(angleRadians + Math.PI / 2) * offset * camera.scale;
+      const tint = ship.secondaryCooldown > 0 ? '#ff4444' : null;
+      this.drawDukRackMissile(x + offsetX, y + offsetY, spriteRadians, camera.scale * 0.6, alpha, tint);
+    }
+  }
+
+  private drawDukRackMissile(
+    x: number,
+    y: number,
+    radians: number,
+    scale: number,
+    alpha: number,
+    tint: string | null,
+  ): void {
+    const image = this.images.getLoaded('dukMissile');
+    const ctx = this.context;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(radians);
+    ctx.globalAlpha = alpha;
+    if (image) {
+      const width = image.naturalWidth * scale;
+      const height = image.naturalHeight * scale;
+      ctx.drawImage(image, -width / 2, -height / 2, width, height);
+      if (tint) {
+        ctx.globalCompositeOperation = 'source-atop';
+        ctx.globalAlpha = alpha * 0.55;
+        ctx.fillStyle = tint;
+        ctx.fillRect(-width / 2, -height / 2, width, height);
+      }
+    } else {
+      ctx.fillStyle = tint ?? '#ffd28a';
+      ctx.fillRect(-8 * scale, -4 * scale, 16 * scale, 8 * scale);
+    }
+    ctx.restore();
   }
 
   private drawVoskumTeleportImprints(ship: ShipState, camera: LegacyCamera): void {
@@ -788,6 +859,14 @@ export class CanvasRenderer {
       return 'cannonadeBoomerang';
     }
 
+    if (projectile.kind === 'dukStunner') {
+      return 'dukStunner';
+    }
+
+    if (projectile.kind === 'dukMissile') {
+      return 'dukMissile';
+    }
+
     return fallback;
   }
 
@@ -803,6 +882,10 @@ export class CanvasRenderer {
     if (projectile.kind === 'frogBubble') {
       const charge = Math.max(0, (fixedToNumber(projectile.radius) - 10) / 3);
       return 0.1 * Math.sqrt(charge);
+    }
+
+    if (projectile.kind === 'dukStunner' || projectile.kind === 'dukMissile') {
+      return 0.6;
     }
 
     return fallback;

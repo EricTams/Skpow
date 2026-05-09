@@ -51,6 +51,7 @@ export interface ShipCustomState {
   readonly cannonTurnAccumulator?: Fixed;
   // True while a Nurtip primary missile is in flight; cleared on detonation or natural death.
   readonly nurtipPrimaryArmed?: boolean;
+  readonly dukMissileCount?: number;
 }
 
 export type ActorKind = 'zizlikNode' | 'goojBackNode' | 'pscoutBeacon';

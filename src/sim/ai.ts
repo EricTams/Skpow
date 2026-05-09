@@ -13,6 +13,8 @@ const ZIZLIK_FIRE_X_TOLERANCE = 50;
 const FIRE_ANGLE_TOLERANCE_STEPS = Math.ceil((0.15 / (Math.PI * 2)) * ANGLE_STEPS);
 const CANNONADE_FIRE_TOLERANCE_STEPS = Math.ceil((0.05 / (Math.PI * 2)) * ANGLE_STEPS);
 const CANNONADE_SPECIAL_MAX_DISTANCE = 1100;
+const DUK_SPECIAL_MAX_DISTANCE = 800;
+const DUK_SPECIAL_LEAD_FRAMES = 40;
 const KRON_SPECIAL_NEAR_RANGE = 400;
 const KRON_SPECIAL_AIM_DOT = 0.5;
 const KRON_SPECIAL_RECEDING_SPEED = 0.05;
@@ -292,6 +294,8 @@ function getShotDistance(ship: ShipState): number {
       return ship.custom.krabLongRange ? 725 : 250;
     case 'nurtip':
       return 850;
+    case 'duk':
+      return 800;
     default:
       return fixedToNumber(SHOT_DISTANCE);
   }
@@ -313,6 +317,8 @@ function getShotLeadFrames(ship: ShipState): number {
       return 25;
     case 'nurtip':
       return 100;
+    case 'duk':
+      return 60;
     default:
       return SHOT_LEAD_FRAMES;
   }
@@ -350,9 +356,21 @@ function shouldUseSpecial(ship: ShipState, enemy: ShipState, distance: number, s
     case 'nurtip':
       // Reference Nurtip::TryUseSpecial pops a rock at random with low odds (~1/1000 frames).
       return distance < 600;
+    case 'duk':
+      return shouldDukUseSpecial(ship, enemy, distance, state);
     default:
       return false;
   }
+}
+
+function shouldDukUseSpecial(ship: ShipState, enemy: ShipState, distance: number, state: GameState): boolean {
+  if ((ship.custom.dukMissileCount ?? 0) <= 0 || distance >= DUK_SPECIAL_MAX_DISTANCE) {
+    return false;
+  }
+
+  const leadRatio = distance / DUK_SPECIAL_MAX_DISTANCE;
+  const aim = getAimSolution(ship, enemy, state, leadRatio * DUK_SPECIAL_LEAD_FRAMES);
+  return Math.abs(getSignedAngleDelta(ship.angle, aim.targetAngle)) <= FIRE_ANGLE_TOLERANCE_STEPS;
 }
 
 function shouldKronUseSpecial(ship: ShipState, enemy: ShipState, distance: number, state: GameState): boolean {

@@ -185,6 +185,25 @@ export const SHIP_CATALOG: readonly ShipCatalogEntry[] = [
     },
   },
   {
+    id: 'duk',
+    name: 'Duk',
+    cost: 18,
+    crew: SHIP_SPECS.duk.crew,
+    battery: SHIP_SPECS.duk.battery,
+    render: {
+      spriteKey: 'dukShip',
+      scale: 0.6,
+      projectileKey: 'dukMissile',
+      projectileScale: 0.6,
+    },
+    hud: {
+      nameKey: 'dukName',
+      portraitKey: 'dukPortrait',
+      shipKey: 'dukShip',
+      shipScale: 1.8,
+    },
+  },
+  {
     id: 'krab',
     name: 'Krab',
     cost: 20,

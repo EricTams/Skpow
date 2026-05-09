@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-05-05T14:47:39.977Z",
+  "generatedAt": "2026-05-09T17:25:24.139Z",
   "root": "art",
-  "fileCount": 80,
+  "fileCount": 85,
   "files": [
     {
       "name": "admiral.jpg",
@@ -127,6 +127,20 @@
       "ext": ".png",
       "relativePath": "art/dethbeam.png",
       "sizeBytes": 5235,
+      "kind": "image"
+    },
+    {
+      "name": "dukname.png",
+      "ext": ".png",
+      "relativePath": "art/dukname.png",
+      "sizeBytes": 3686,
+      "kind": "image"
+    },
+    {
+      "name": "dukportrait.jpg",
+      "ext": ".jpg",
+      "relativePath": "art/dukportrait.jpg",
+      "sizeBytes": 20216,
       "kind": "image"
     },
     {
@@ -281,6 +295,27 @@
       "ext": ".jpg",
       "relativePath": "art/mainscreen.jpg",
       "sizeBytes": 673766,
+      "kind": "image"
+    },
+    {
+      "name": "missile.png",
+      "ext": ".png",
+      "relativePath": "art/missile.png",
+      "sizeBytes": 5415,
+      "kind": "image"
+    },
+    {
+      "name": "missileship.png",
+      "ext": ".png",
+      "relativePath": "art/missileship.png",
+      "sizeBytes": 15577,
+      "kind": "image"
+    },
+    {
+      "name": "missilethingee.png",
+      "ext": ".png",
+      "relativePath": "art/missilethingee.png",
+      "sizeBytes": 4664,
       "kind": "image"
     },
     {

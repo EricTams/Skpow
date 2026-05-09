@@ -1,6 +1,6 @@
 import { fixed, fixedFromInt, fixedMul, type Fixed } from './fixed';
 
-export type ShipId = 'frog' | 'cannonade' | 'zizlik' | 'voskum' | 'pscout' | 'kron' | 'gooj' | 'krab' | 'nurtip';
+export type ShipId = 'frog' | 'cannonade' | 'zizlik' | 'voskum' | 'pscout' | 'kron' | 'gooj' | 'krab' | 'nurtip' | 'duk';
 
 export type ProjectileKind =
   | 'generic'
@@ -16,7 +16,9 @@ export type ProjectileKind =
   | 'krabLong'
   | 'krabShort'
   | 'nurtipMissile'
-  | 'nurtipAsteroid';
+  | 'nurtipAsteroid'
+  | 'dukStunner'
+  | 'dukMissile';
 
 export interface WeaponSpec {
   readonly speed: Fixed;
@@ -287,6 +289,36 @@ export const SHIP_SPECS: Record<ShipId, ShipSpec> = {
       damage: 4,
       radius: fixedFromInt(20),
       kind: 'nurtipAsteroid',
+    },
+  },
+  duk: {
+    id: 'duk',
+    crew: 18,
+    battery: 16,
+    batteryChargeFrames: 70,
+    turnStep: legacyTurnStep(0.012),
+    maxSpeed: legacyMaxSpeed(1.39),
+    accel: legacyAccel(0.018),
+    brake: fixed(0.99),
+    radius: legacyHitRadius(75, 0.6),
+    renderScale: 0.6,
+    primary: {
+      speed: fixed(9),
+      framesPerShot: 60,
+      cost: 2,
+      ttl: 1000,
+      damage: 1,
+      radius: fixedFromInt(10),
+      kind: 'dukStunner',
+    },
+    secondary: {
+      speed: fixed(10),
+      framesPerShot: 300,
+      cost: 2,
+      ttl: 300,
+      damage: 10,
+      radius: fixedFromInt(20),
+      kind: 'dukMissile',
     },
   },
   krab: {

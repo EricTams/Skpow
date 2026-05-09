@@ -139,6 +139,18 @@ export const legacyAssets = {
     relativePath: 'art/asteroidbrown.png',
     url: new URL('../../art/asteroidbrown.png', import.meta.url).href,
   },
+  dukShip: {
+    relativePath: 'art/missileship.png',
+    url: new URL('../../art/missileship.png', import.meta.url).href,
+  },
+  dukMissile: {
+    relativePath: 'art/missile.png',
+    url: new URL('../../art/missile.png', import.meta.url).href,
+  },
+  dukStunner: {
+    relativePath: 'art/missilethingee.png',
+    url: new URL('../../art/missilethingee.png', import.meta.url).href,
+  },
   mainScreen: {
     relativePath: 'art/mainscreen.jpg',
     url: new URL('../../art/mainscreen.jpg', import.meta.url).href,
@@ -218,6 +230,10 @@ export const legacyAssets = {
   nurtipName: {
     relativePath: 'art/nurtipname.png',
     url: new URL('../../art/nurtipname.png', import.meta.url).href,
+  },
+  dukName: {
+    relativePath: 'art/dukname.png',
+    url: new URL('../../art/dukname.png', import.meta.url).href,
   },
   planet: {
     relativePath: 'art/planets.png',
@@ -306,6 +322,10 @@ export const legacyAssets = {
   nurtipPortrait: {
     relativePath: 'art/nurtipportrait.jpg',
     url: new URL('../../art/nurtipportrait.jpg', import.meta.url).href,
+  },
+  dukPortrait: {
+    relativePath: 'art/dukportrait.jpg',
+    url: new URL('../../art/dukportrait.jpg', import.meta.url).href,
   },
   frogShot: {
     relativePath: 'art/frogshot.png',
