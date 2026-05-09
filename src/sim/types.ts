@@ -52,6 +52,10 @@ export interface ShipCustomState {
   // True while a Nurtip primary missile is in flight; cleared on detonation or natural death.
   readonly nurtipPrimaryArmed?: boolean;
   readonly dukMissileCount?: number;
+  readonly discfighterDiscState?: 'docked' | 'thrusting' | 'waiting';
+  readonly discfighterDiscX?: Fixed;
+  readonly discfighterDiscY?: Fixed;
+  readonly discfighterDiscUpdateMissed?: number;
 }
 
 export type ActorKind = 'zizlikNode' | 'goojBackNode' | 'pscoutBeacon';

@@ -224,6 +224,25 @@ export const SHIP_CATALOG: readonly ShipCatalogEntry[] = [
       shipScale: 1.3,
     },
   },
+  {
+    id: 'discfighter',
+    name: 'Numinus',
+    cost: 30,
+    crew: SHIP_SPECS.discfighter.crew,
+    battery: SHIP_SPECS.discfighter.battery,
+    render: {
+      spriteKey: 'discfighterShip',
+      scale: 0.2,
+      projectileKey: 'discfighterDisc',
+      projectileScale: 0.2,
+    },
+    hud: {
+      nameKey: 'discfighterName',
+      portraitKey: 'discfighterPortrait',
+      shipKey: 'discfighterShip',
+      shipScale: 0.6,
+    },
+  },
 ] as const;
 
 export const DEFAULT_MATCH_SHIPS: readonly [ShipCatalogId, ShipCatalogId] = ['frog', 'cannonade'];

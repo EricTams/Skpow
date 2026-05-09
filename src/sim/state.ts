@@ -99,6 +99,8 @@ function createCustomState(shipId: ShipId, facing: ShipState['angle']): ShipCust
       return { pscoutBeamFrames: 0, pscoutBeamStrength: 0 };
     case 'duk':
       return { dukMissileCount: 4 };
+    case 'discfighter':
+      return { discfighterDiscState: 'docked', discfighterDiscUpdateMissed: 0 };
     default:
       return {};
   }
@@ -115,6 +117,8 @@ function sanitizeRoundStartCustom(shipId: ShipId, facing: ShipState['angle'], cu
       return { dukMissileCount: custom?.dukMissileCount ?? base.dukMissileCount };
     case 'pscout':
       return { pscoutBeamFrames: 0, pscoutBeamStrength: 0 };
+    case 'discfighter':
+      return { discfighterDiscState: 'docked', discfighterDiscUpdateMissed: 0 };
     default:
       return base;
   }

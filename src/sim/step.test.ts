@@ -951,6 +951,88 @@ describe('reference-backed ship abilities', () => {
     expect(blocked.projectiles).toHaveLength(0);
   });
 
+  it('initializes Discfighter with reference stats and docked disc state', () => {
+    const state = createInitialState(123, ['discfighter', 'frog']);
+
+    expect(state.ships[0]).toMatchObject({ shipId: 'discfighter', crew: 30, maxCrew: 30, battery: 30, maxBattery: 30 });
+    expect(state.ships[0].custom.discfighterDiscState).toBe('docked');
+    expect(getShipSpec('discfighter').primary.framesPerShot).toBe(25);
+    expect(getShipSpec('discfighter').secondary.framesPerShot).toBe(50);
+  });
+
+  it('launches, parks, and docks the Discfighter disc', () => {
+    let state = withShip(createInitialState(123, ['discfighter', 'frog'], { gravityDivisor: 1_000_000, speedMultiplier: 1 }), {
+      x: fixedFromInt(500),
+      y: fixedFromInt(0),
+      vx: fixed(0),
+      vy: fixed(0),
+      angle: angle(0),
+      freezeFrames: 1,
+    });
+
+    state = stepGame(state, [InputBits.FirePrimary, 0]);
+    expect(state.ships[0].battery).toBe(28);
+    expect(state.ships[0].primaryCooldown).toBe(25);
+    expect(state.ships[0].custom.discfighterDiscState).toBe('thrusting');
+    expect(state.projectiles.filter((projectile) => projectile.kind === 'discfighterDisc')).toHaveLength(1);
+    const launchedX = state.projectiles[0].x;
+
+    state = stepGame(state, [InputBits.FirePrimary, 0]);
+    expect(state.ships[0].custom.discfighterDiscState).toBe('thrusting');
+    expect(state.projectiles[0].x).toBeGreaterThan(launchedX);
+    const heldX = state.projectiles[0].x;
+
+    state = stepGame(state, [0, 0]);
+    expect(state.ships[0].custom.discfighterDiscState).toBe('waiting');
+    expect(state.projectiles[0].x).toBe(heldX);
+
+    while (state.ships[0].primaryCooldown > 0) {
+      state = stepGame(state, [0, 0]);
+    }
+    state = stepGame(state, [InputBits.FirePrimary, 0]);
+    expect(state.ships[0].custom.discfighterDiscState).toBe('docked');
+    expect(state.ships[0].primaryCooldown).toBe(20);
+    expect(state.projectiles.filter((projectile) => projectile.kind === 'discfighterDisc')).toHaveLength(0);
+  });
+
+  it('shocks targets along the Discfighter disc tether', () => {
+    const seeded = createInitialState(123, ['discfighter', 'frog']);
+    const state: GameState = {
+      ...seeded,
+      ships: [
+        {
+          ...seeded.ships[0],
+          x: fixedFromInt(0),
+          y: fixedFromInt(0),
+          vx: fixed(0),
+          vy: fixed(0),
+          custom: {
+            ...seeded.ships[0].custom,
+            discfighterDiscState: 'waiting',
+            discfighterDiscX: fixedFromInt(600),
+            discfighterDiscY: fixedFromInt(0),
+          },
+        },
+        {
+          ...seeded.ships[1],
+          x: fixedFromInt(300),
+          y: fixedFromInt(30),
+          vx: fixed(0),
+          vy: fixed(0),
+        },
+      ],
+      projectiles: [
+        buildProjectile({ ownerId: 0, x: fixedFromInt(600), y: fixedFromInt(0), kind: 'discfighterDisc', ttl: 100, damage: 4 }),
+      ],
+    };
+
+    const next = stepGame(state, [InputBits.FireSecondary, 0]);
+
+    expect(next.ships[0].battery).toBe(28);
+    expect(next.ships[0].secondaryCooldown).toBe(50);
+    expect(next.ships[1].crew).toBe(28);
+  });
+
   it('hydrates persistent round-start crew and actors', () => {
     const pscout = createInitialState(123, ['pscout', 'frog'], undefined, [
       { crew: 4, pscoutBeaconSlots: [0, 1] },

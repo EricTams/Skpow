@@ -62,6 +62,9 @@ const DUK_STUNNER_FULL_SPEED_TTL = DUK_STUNNER_SLOW_TTL + DUK_STUNNER_RAMP_FRAME
 const DUK_LEGACY_LIFE_DECAY = 3;
 const PSCOUT_BEAM_FRAMES = 200;
 const PSCOUT_BEAM_DAMAGE_FRAME = 50;
+const DISCFIGHTER_DISC_STALE_FRAMES = 40;
+const DISCFIGHTER_DOCK_COOLDOWN = 20;
+const DISCFIGHTER_SHOCK_RADIUS = 60;
 // Nurtip remote-detonation primary: tap to launch, hold to cruise, release to AOE-detonate.
 export const NURTIP_DETONATION_RADIUS = fixedFromInt(150);
 export const NURTIP_DETONATION_DAMAGE = 2;
@@ -201,6 +204,7 @@ export function stepGame(state: GameState, inputs: FrameInputs): GameState {
   const hitResult = resolveProjectileHits(movedProjectiles, affectedShips, actors, nextActorId);
   affectedShips = hitResult.ships;
   affectedShips = updateCannonadeSecondaryCooldowns(affectedShips, projectilesBeforeResolution, hitResult.projectiles);
+  affectedShips = updateDiscfighterDiscOwners(affectedShips, projectilesBeforeResolution, hitResult.projectiles);
   actors = hitResult.actors;
   nextActorId = hitResult.nextActorId;
 
@@ -408,6 +412,10 @@ function stepShip(
     }
   }
 
+  if (ship.shipId === 'discfighter') {
+    custom = syncDiscfighterDiscState(ship, custom, state);
+  }
+
   if (batteryChargeFrame >= baseSpec.batteryChargeFrames) {
     battery = Math.min(baseSpec.battery, battery + 1);
     batteryChargeFrame = 0;
@@ -506,7 +514,23 @@ function stepShip(
   const projectileInheritedVx = ship.freezeFrames === 0 ? vx : (0 as Fixed);
   const projectileInheritedVy = ship.freezeFrames === 0 ? vy : (0 as Fixed);
 
-  if ((input & InputBits.FirePrimary) !== 0) {
+  let primaryHandled = false;
+  if (
+    ship.shipId === 'discfighter' &&
+    (input & InputBits.FirePrimary) !== 0 &&
+    custom.discfighterDiscState === 'waiting' &&
+    primaryCooldown === 0
+  ) {
+    const disc = getDiscfighterDisc(state.projectiles, ship.id);
+    if (disc) {
+      removedProjectileIds.push(disc.id);
+    }
+    custom = { ...custom, discfighterDiscState: 'docked', discfighterDiscUpdateMissed: 0 };
+    primaryCooldown = DISCFIGHTER_DOCK_COOLDOWN;
+    primaryHandled = true;
+  }
+
+  if ((input & InputBits.FirePrimary) !== 0 && !primaryHandled) {
     const result = firePrimary(ship, activeSpec, state, {
       x,
       y,
@@ -556,6 +580,8 @@ function stepShip(
     custom = { ...custom, frogCharge: 0, frogChargeTime: 0 };
   } else if (ship.shipId === 'frog') {
     custom = { ...custom, frogChargeTime: 0 };
+  } else if (ship.shipId === 'discfighter' && custom.discfighterDiscState === 'thrusting') {
+    custom = { ...custom, discfighterDiscState: 'waiting' };
   } else if (ship.shipId === 'nurtip' && custom.nurtipPrimaryArmed) {
     // Reference: releasing primary detonates the in-flight torpedo as a 150-radius AOE for 2 dmg.
     const missile = state.projectiles.find(
@@ -656,6 +682,33 @@ function emptyShipResult(ship: ShipState, rngSeed: RngSeed, nextProjectileId: nu
     nextProjectileId,
     nextActorId,
   };
+}
+
+function syncDiscfighterDiscState(ship: ShipState, custom: ShipState['custom'], state: GameState): ShipState['custom'] {
+  if (custom.discfighterDiscState === 'docked' || custom.discfighterDiscState === undefined) {
+    return { ...custom, discfighterDiscState: 'docked', discfighterDiscUpdateMissed: 0 };
+  }
+
+  const disc = getDiscfighterDisc(state.projectiles, ship.id);
+  if (disc) {
+    return {
+      ...custom,
+      discfighterDiscX: disc.x,
+      discfighterDiscY: disc.y,
+      discfighterDiscUpdateMissed: 0,
+    };
+  }
+
+  const missed = (custom.discfighterDiscUpdateMissed ?? 0) + 1;
+  if (missed > DISCFIGHTER_DISC_STALE_FRAMES) {
+    return { ...custom, discfighterDiscState: 'docked', discfighterDiscUpdateMissed: 0 };
+  }
+
+  return { ...custom, discfighterDiscUpdateMissed: missed };
+}
+
+function getDiscfighterDisc(projectiles: readonly ProjectileState[], ownerId: number): ProjectileState | undefined {
+  return projectiles.find((projectile) => projectile.active && projectile.kind === 'discfighterDisc' && projectile.ownerId === ownerId);
 }
 
 function updateVoskumTeleportVisual(
@@ -859,6 +912,9 @@ export function stepProjectile(projectile: ProjectileState, state: GameState, rn
   if (projectile.kind === 'dukStunner') {
     return updateDukStunner(projectile, state, rngSeed);
   }
+  if (projectile.kind === 'discfighterDisc') {
+    return updateDiscfighterDisc(projectile, state);
+  }
 
   const steered = projectile.trackPct > 0 ? steerProjectile(projectile, state, rngSeed) : projectile;
   const x = wrapSignedFixed(fixedAdd(steered.x, steered.vx), state.arena.width);
@@ -872,6 +928,28 @@ export function stepProjectile(projectile: ProjectileState, state: GameState, rn
     ttl,
     rotation: fixedAdd(steered.rotation, fixed(0.2)),
     active: ttl > 0 && !isInsidePlanet(x, y, state.planet.radius, state),
+  };
+}
+
+function updateDiscfighterDisc(projectile: ProjectileState, state: GameState): ProjectileState {
+  const owner = state.ships[projectile.ownerId];
+  const ttl = projectile.ttl - 1;
+  if (!owner?.alive || owner.custom.discfighterDiscState === 'docked' || ttl <= 0) {
+    return { ...projectile, ttl, active: false };
+  }
+
+  const speedMultiplier = getGameplaySpeedMultiplierFixed(state);
+  const moving = owner.custom.discfighterDiscState === 'thrusting';
+  const x = moving ? wrapSignedFixed(fixedAdd(projectile.x, projectile.vx), state.arena.width) : projectile.x;
+  const y = moving ? wrapSignedFixed(fixedAdd(projectile.y, projectile.vy), state.arena.height) : projectile.y;
+
+  return {
+    ...projectile,
+    x,
+    y,
+    ttl,
+    rotation: fixedAdd(projectile.rotation, fixedMul(fixed(0.6), speedMultiplier)),
+    active: !isInsidePlanet(x, y, state.planet.radius, state),
   };
 }
 
@@ -1032,6 +1110,59 @@ function getCannonadeSecondaryOwners(projectiles: readonly ProjectileState[]): R
   const owners = new Set<number>();
   for (const projectile of projectiles) {
     if (projectile.active && projectile.kind === 'cannonadeBoomerang') {
+      owners.add(projectile.ownerId);
+    }
+  }
+  return owners;
+}
+
+function updateDiscfighterDiscOwners(
+  ships: readonly ShipState[],
+  projectilesBeforeResolution: readonly ProjectileState[],
+  activeProjectiles: readonly ProjectileState[],
+): readonly ShipState[] {
+  const previousOwners = getDiscfighterDiscOwners(projectilesBeforeResolution);
+  const activeOwners = getDiscfighterDiscOwners(activeProjectiles);
+
+  return ships.map((ship) => {
+    if (ship.shipId !== 'discfighter') {
+      return ship;
+    }
+
+    const activeDisc = activeProjectiles.find(
+      (projectile) => projectile.active && projectile.kind === 'discfighterDisc' && projectile.ownerId === ship.id,
+    );
+    if (activeDisc) {
+      return {
+        ...ship,
+        custom: {
+          ...ship.custom,
+          discfighterDiscX: activeDisc.x,
+          discfighterDiscY: activeDisc.y,
+          discfighterDiscUpdateMissed: 0,
+        },
+      };
+    }
+
+    if (previousOwners.has(ship.id) && !activeOwners.has(ship.id)) {
+      return {
+        ...ship,
+        custom: {
+          ...ship.custom,
+          discfighterDiscState: 'docked',
+          discfighterDiscUpdateMissed: 0,
+        },
+      };
+    }
+
+    return ship;
+  });
+}
+
+function getDiscfighterDiscOwners(projectiles: readonly ProjectileState[]): ReadonlySet<number> {
+  const owners = new Set<number>();
+  for (const projectile of projectiles) {
+    if (projectile.active && projectile.kind === 'discfighterDisc') {
       owners.add(projectile.ownerId);
     }
   }
@@ -1249,6 +1380,20 @@ function firePrimary(
       nextProjectileId += 1;
       custom = { ...custom, nurtipPrimaryArmed: true };
       break;
+    case 'discfighter':
+      if (custom.discfighterDiscState !== 'docked') {
+        return { actors, projectiles, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
+      }
+      projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, context.x, context.y, context.shipAngle, state, 0 as Fixed, 0 as Fixed));
+      nextProjectileId += 1;
+      custom = {
+        ...custom,
+        discfighterDiscState: 'thrusting',
+        discfighterDiscX: context.x,
+        discfighterDiscY: context.y,
+        discfighterDiscUpdateMissed: 0,
+      };
+      break;
     case 'duk': {
       const spread = nextRandom(rngSeed);
       rngSeed = spread.seed;
@@ -1420,6 +1565,13 @@ function fireSecondary(
       projectiles.push(spawn(nextProjectileId, ship.id, spec.secondary, context.x, context.y, shotAngle, state, context.vx, context.vy));
       nextProjectileId += 1;
       custom = { ...custom, dukMissileCount: missileCount - 1 };
+      break;
+    }
+    case 'discfighter': {
+      if (custom.discfighterDiscState === 'docked') {
+        return { actors, projectiles, damageEffects, freezeEffects, battery, secondaryCooldown, x, y, custom, rngSeed, nextProjectileId, nextActorId };
+      }
+      damageEffects.push(...getDiscfighterShockDamageEffects(ship, context.x, context.y, custom, state, spec.secondary.damage));
       break;
     }
   }
@@ -1725,6 +1877,54 @@ export function isKronBeamHitting(x: Fixed, y: Fixed, facing: Angle, enemy: Ship
     }
   }
   return false;
+}
+
+function getDiscfighterShockDamageEffects(
+  ship: ShipState,
+  x: Fixed,
+  y: Fixed,
+  custom: ShipState['custom'],
+  state: GameState,
+  damage: number,
+): readonly DamageEffect[] {
+  const disc = getDiscfighterDisc(state.projectiles, ship.id);
+  const discX = disc?.x ?? custom.discfighterDiscX;
+  const discY = disc?.y ?? custom.discfighterDiscY;
+  if (discX === undefined || discY === undefined) {
+    return [];
+  }
+
+  const endX = fixedToNumber(wrappedDelta(discX, x, state.arena.width));
+  const endY = fixedToNumber(wrappedDelta(discY, y, state.arena.height));
+  if (Math.hypot(endX, endY) < 1) {
+    return [];
+  }
+
+  const effects: DamageEffect[] = [];
+  for (const candidate of state.ships) {
+    if (!candidate.alive || candidate.id === ship.id) {
+      continue;
+    }
+
+    const targetX = fixedToNumber(wrappedDelta(candidate.x, x, state.arena.width));
+    const targetY = fixedToNumber(wrappedDelta(candidate.y, y, state.arena.height));
+    const targetRadius = fixedToNumber(getShipSpec(candidate.shipId).radius);
+    if (pointToSegmentDistance(targetX, targetY, endX, endY) <= DISCFIGHTER_SHOCK_RADIUS + targetRadius) {
+      effects.push({ targetId: candidate.id, sourceId: ship.id, damage });
+    }
+  }
+
+  return effects;
+}
+
+function pointToSegmentDistance(px: number, py: number, bx: number, by: number): number {
+  const lengthSq = bx * bx + by * by;
+  if (lengthSq === 0) {
+    return Math.hypot(px, py);
+  }
+
+  const t = Math.max(0, Math.min(1, (px * bx + py * by) / lengthSq));
+  return Math.hypot(px - bx * t, py - by * t);
 }
 
 function getZizlikFireOrigins(

@@ -13,6 +13,8 @@ import kronSpecialUrl from '../sfx/kron_SW.ogg?url';
 import kronFireUrl from '../sfx/kron_WF.ogg?url';
 import missileshipSpecialUrl from '../sfx/missileship_SW.ogg?url';
 import missileshipFireUrl from '../sfx/missileship_WF.ogg?url';
+import numinusSpecialUrl from '../sfx/numinus_SW.ogg?url';
+import numinusFireUrl from '../sfx/numinus_WF.ogg?url';
 import nurtipSpecialUrl from '../sfx/nurtip_SW.ogg?url';
 import nurtipFireUrl from '../sfx/nurtip_WF.ogg?url';
 import panthonSpecialUrl from '../sfx/panthon_SW2.ogg?url';
@@ -51,6 +53,8 @@ export const audioAssets = {
     SOUND_KRAB_SPECIAL: krabSpecialUrl,
     SOUND_MISSILESHIP_FIRE: missileshipFireUrl,
     SOUND_MISSILESHIP_SPECIAL: missileshipSpecialUrl,
+    SOUND_DISCFIGHTER_FIRE: numinusFireUrl,
+    SOUND_DISCFIGHTER_SPECIAL: numinusSpecialUrl,
   },
 } as const;
 
@@ -96,5 +100,9 @@ export const shipSfx: Record<ShipId, { readonly primary: SfxId; readonly seconda
   duk: {
     primary: 'SOUND_MISSILESHIP_FIRE',
     secondary: 'SOUND_MISSILESHIP_SPECIAL',
+  },
+  discfighter: {
+    primary: 'SOUND_DISCFIGHTER_FIRE',
+    secondary: 'SOUND_DISCFIGHTER_SPECIAL',
   },
 };

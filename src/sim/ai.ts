@@ -14,7 +14,7 @@ const FIRE_ANGLE_TOLERANCE_STEPS = Math.ceil((0.15 / (Math.PI * 2)) * ANGLE_STEP
 const CANNONADE_FIRE_TOLERANCE_STEPS = Math.ceil((0.05 / (Math.PI * 2)) * ANGLE_STEPS);
 const CANNONADE_SPECIAL_MAX_DISTANCE = 1100;
 const DUK_SPECIAL_MAX_DISTANCE = 800;
-const DUK_SPECIAL_LEAD_FRAMES = 40;
+const DUK_SPECIAL_LEAD_FRAMES = 60;
 const KRON_SPECIAL_NEAR_RANGE = 400;
 const KRON_SPECIAL_AIM_DOT = 0.5;
 const KRON_SPECIAL_RECEDING_SPEED = 0.05;
@@ -22,6 +22,10 @@ const AI_PURSUIT_MIN_FRAMES = 3 * 60;
 const AI_PURSUIT_FRAME_RANGE = 3 * 60;
 const AI_EVADE_MIN_FRAMES = Math.round(0.5 * 60);
 const AI_EVADE_FRAME_RANGE = 60;
+const AI_LEAD_MIN_FRAMES = Math.round(0.5 * 60);
+const AI_LEAD_FRAME_RANGE = Math.round(1.5 * 60);
+const AI_LEAD_SCALE_MIN = 0.5;
+const AI_LEAD_SCALE_RANGE = 1.5;
 const AI_EVADE_MODES = ['back', 'right', 'left'] as const satisfies readonly AiMovementMode[];
 const PLANET_AVOIDANCE_PADDING = 220;
 const PLANET_AVOIDANCE_LOOKAHEAD = 900;
@@ -47,8 +51,9 @@ export function getAiInput(state: GameState, playerId: number): number {
   const closeLeadFrames = getShotLeadFrames(ship);
   const pursuitLeadFrames = getPursuitLeadFrames(ship);
   const leadFrames = directAim.distance < shotDistance * CLOSE_SHOT_DISTANCE_RATIO ? closeLeadFrames : pursuitLeadFrames;
-  const aim = getAimSolution(ship, enemy, state, leadRatio * leadFrames);
-  const shotAim = getAimSolution(ship, enemy, state, leadRatio * closeLeadFrames);
+  const leadScale = getAiLeadScale(state.frame, playerId);
+  const aim = getAimSolution(ship, enemy, state, leadRatio * leadFrames * leadScale);
+  const shotAim = getAimSolution(ship, enemy, state, leadRatio * closeLeadFrames * leadScale);
   const cannonAngle = ship.custom.cannonAngle ?? ship.angle;
   const fireReferenceAngle = ship.shipId === 'cannonade' ? cannonAngle : ship.angle;
   const movementMode = getAiMovementMode(state, playerId);
@@ -72,7 +77,7 @@ export function getAiInput(state: GameState, playerId: number): number {
   const inFiringPosition = shotAim.distance < shotDistance && shotDelta <= shotTolerance;
   const shouldFirePrimary =
     ship.shipId === 'zizlik'
-      ? shouldZizlikFire(ship, enemy, state)
+      ? shouldZizlikFire(ship, enemy, state, leadScale)
       : ship.shipId === 'frog'
         ? shouldFrogHoldFire(ship, inFiringPosition)
         : ship.shipId === 'nurtip'
@@ -84,7 +89,7 @@ export function getAiInput(state: GameState, playerId: number): number {
     input |= InputBits.FirePrimary;
   }
 
-  if (shouldUseSpecial(ship, enemy, directAim.distance, state)) {
+  if (shouldUseSpecial(ship, enemy, directAim.distance, state, leadScale)) {
     input |= InputBits.FireSecondary;
   }
 
@@ -161,6 +166,26 @@ function getEvadeMode(playerId: number, cycle: number): AiMovementMode {
   return AI_EVADE_MODES[Math.floor(unitHash(playerId, cycle, 0xa11e) * AI_EVADE_MODES.length)] ?? 'back';
 }
 
+function getAiLeadScale(frame: number, playerId: number): number {
+  const segment = getAiLeadSegment(frame, playerId);
+  return AI_LEAD_SCALE_MIN + unitHash(playerId, segment, 0x1ead) * AI_LEAD_SCALE_RANGE;
+}
+
+function getAiLeadSegment(frame: number, playerId: number): number {
+  let remainingFrames = Math.max(0, frame);
+  let segment = 0;
+
+  while (true) {
+    const segmentFrames = AI_LEAD_MIN_FRAMES + Math.floor(unitHash(playerId, segment, 0x5ca1e) * (AI_LEAD_FRAME_RANGE + 1));
+    if (remainingFrames < segmentFrames) {
+      return segment;
+    }
+
+    remainingFrames -= segmentFrames;
+    segment += 1;
+  }
+}
+
 function unitHash(playerId: number, cycle: number, salt: number): number {
   let value = (salt ^ Math.imul(playerId + 1, 0x85eb_ca6b) ^ Math.imul(cycle + 1, 0xc2b2_ae35)) >>> 0;
   value ^= value >>> 16;
@@ -168,11 +193,11 @@ function unitHash(playerId: number, cycle: number, salt: number): number {
   value ^= value >>> 15;
   value = Math.imul(value, 0x846c_a68b) >>> 0;
   value ^= value >>> 16;
-  return value / 0x1_0000_0000;
+  return (value >>> 0) / 0x1_0000_0000;
 }
 
-function shouldZizlikFire(ship: ShipState, enemy: ShipState, state: GameState): boolean {
-  const aim = getAimSolution(ship, enemy, state, getShotLeadFrames(ship));
+function shouldZizlikFire(ship: ShipState, enemy: ShipState, state: GameState, leadScale: number): boolean {
+  const aim = getAimSolution(ship, enemy, state, getShotLeadFrames(ship) * leadScale);
   return Math.abs(aim.dx) < ZIZLIK_FIRE_X_TOLERANCE && aim.distance < getShotDistance(ship);
 }
 
@@ -268,6 +293,17 @@ function angleToRadians(current: Angle): number {
   return (current / ANGLE_STEPS) * Math.PI * 2;
 }
 
+function clampRadians(value: number): number {
+  let result = value;
+  while (result > Math.PI) {
+    result -= Math.PI * 2;
+  }
+  while (result < -Math.PI) {
+    result += Math.PI * 2;
+  }
+  return result;
+}
+
 function toAngleSteps(radians: number): Angle {
   return angle(Math.round((radians / (Math.PI * 2)) * ANGLE_STEPS));
 }
@@ -296,6 +332,8 @@ function getShotDistance(ship: ShipState): number {
       return 850;
     case 'duk':
       return 800;
+    case 'discfighter':
+      return 900;
     default:
       return fixedToNumber(SHOT_DISTANCE);
   }
@@ -318,7 +356,9 @@ function getShotLeadFrames(ship: ShipState): number {
     case 'nurtip':
       return 100;
     case 'duk':
-      return 60;
+      return 90;
+    case 'discfighter':
+      return 18;
     default:
       return SHOT_LEAD_FRAMES;
   }
@@ -328,7 +368,7 @@ function getPursuitLeadFrames(ship: ShipState): number {
   return ship.shipId === 'zizlik' ? 30 : PURSUIT_LEAD_FRAMES;
 }
 
-function shouldUseSpecial(ship: ShipState, enemy: ShipState, distance: number, state: GameState): boolean {
+function shouldUseSpecial(ship: ShipState, enemy: ShipState, distance: number, state: GameState, leadScale: number): boolean {
   const spec = getShipSpec(ship.shipId);
   if (ship.secondaryCooldown > 0 || ship.battery < spec.secondary.cost) {
     return false;
@@ -357,19 +397,49 @@ function shouldUseSpecial(ship: ShipState, enemy: ShipState, distance: number, s
       // Reference Nurtip::TryUseSpecial pops a rock at random with low odds (~1/1000 frames).
       return distance < 600;
     case 'duk':
-      return shouldDukUseSpecial(ship, enemy, distance, state);
+      return shouldDukUseSpecial(ship, enemy, distance, state, leadScale);
+    case 'discfighter':
+      return shouldDiscfighterUseSpecial(ship, enemy, state);
     default:
       return false;
   }
 }
 
-function shouldDukUseSpecial(ship: ShipState, enemy: ShipState, distance: number, state: GameState): boolean {
+function shouldDiscfighterUseSpecial(ship: ShipState, enemy: ShipState, state: GameState): boolean {
+  if (ship.custom.discfighterDiscState === 'docked') {
+    return false;
+  }
+
+  const discX = ship.custom.discfighterDiscX;
+  const discY = ship.custom.discfighterDiscY;
+  if (discX === undefined || discY === undefined) {
+    return false;
+  }
+
+  const shipX = fixedToNumber(ship.x);
+  const shipY = fixedToNumber(ship.y);
+  const enemyDx = getWrappedDelta(fixedToNumber(enemy.x) - shipX, fixedToNumber(state.arena.width));
+  const enemyDy = getWrappedDelta(fixedToNumber(enemy.y) - shipY, fixedToNumber(state.arena.height));
+  const discDx = getWrappedDelta(fixedToNumber(discX) - shipX, fixedToNumber(state.arena.width));
+  const discDy = getWrappedDelta(fixedToNumber(discY) - shipY, fixedToNumber(state.arena.height));
+  const enemyDist = Math.hypot(enemyDx, enemyDy);
+  const discDist = Math.hypot(discDx, discDy);
+  if (enemyDist <= 0 || discDist < enemyDist) {
+    return false;
+  }
+
+  const enemyAngle = Math.atan2(enemyDy, enemyDx);
+  const discAngle = Math.atan2(discDy, discDx);
+  return Math.abs(clampRadians(discAngle - enemyAngle)) <= 0.15;
+}
+
+function shouldDukUseSpecial(ship: ShipState, enemy: ShipState, distance: number, state: GameState, leadScale: number): boolean {
   if ((ship.custom.dukMissileCount ?? 0) <= 0 || distance >= DUK_SPECIAL_MAX_DISTANCE) {
     return false;
   }
 
   const leadRatio = distance / DUK_SPECIAL_MAX_DISTANCE;
-  const aim = getAimSolution(ship, enemy, state, leadRatio * DUK_SPECIAL_LEAD_FRAMES);
+  const aim = getAimSolution(ship, enemy, state, leadRatio * DUK_SPECIAL_LEAD_FRAMES * leadScale);
   return Math.abs(getSignedAngleDelta(ship.angle, aim.targetAngle)) <= FIRE_ANGLE_TOLERANCE_STEPS;
 }
 

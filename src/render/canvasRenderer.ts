@@ -23,6 +23,8 @@ const SHIP_EXPLOSION_LIFE_AT_FIRST_FRAME = 80;
 const SHIP_EXPLOSION_RENDER_SCALE = 1.0;
 const THRUST_DUST_COLOR = 'rgb(255, 144, 64)';
 const THRUST_DUST_BASE_RADIUS = 12;
+const DISCFIGHTER_SHOCK_HALF_WIDTH = 60;
+const FROG_MIN_BUBBLE_PROJECTILE_SCALE = 0.1;
 const GOOJ_JUNK_KEYS = ['goojJunk', 'goojJunk2', 'goojJunk3', 'goojJunk4', 'goojJunk5', 'goojJunk6', 'goojJunk7'] as const satisfies readonly LegacyAssetKey[];
 const DUST_MIN_PARALLAX = 0.35;
 const DUST_MAX_PARALLAX = 1.0;
@@ -302,6 +304,9 @@ export class CanvasRenderer {
       case 'duk':
         this.drawDukShip(ship, camera, x, y, angleRadians, spriteRadians);
         break;
+      case 'discfighter':
+        this.drawDiscfighterShip(ship, state, camera, x, y, angleRadians, spriteRadians);
+        break;
       default:
         this.drawGenericShip(ship, camera, x, y, spriteRadians);
         break;
@@ -494,6 +499,158 @@ export class CanvasRenderer {
       ctx.fillStyle = tint ?? '#ffd28a';
       ctx.fillRect(-8 * scale, -4 * scale, 16 * scale, 8 * scale);
     }
+    ctx.restore();
+  }
+
+  private drawDiscfighterShip(
+    ship: ShipState,
+    state: GameState,
+    camera: LegacyCamera,
+    x: number,
+    y: number,
+    angleRadians: number,
+    spriteRadians: number,
+  ): void {
+    const alpha = ship.alive ? 1 : 0.35;
+    const hullDrawn = this.drawSpriteAt('discfighterShip', x, y, spriteRadians, camera.scale * 0.2, alpha);
+    if (!hullDrawn) {
+      this.drawFallbackAt(ship, x, y, spriteRadians, camera.scale, alpha);
+    }
+
+    if (ship.custom.discfighterDiscState === 'docked') {
+      const offsetX = -28 * Math.cos(angleRadians) * camera.scale;
+      const offsetY = -28 * Math.sin(angleRadians) * camera.scale;
+      this.drawSpriteAt('discfighterDisc', x + offsetX, y + offsetY, state.frame * 0.6, camera.scale * 0.2, alpha);
+    } else {
+      this.drawDiscfighterTether(ship, state, camera, x, y);
+    }
+  }
+
+  private drawDiscfighterTether(ship: ShipState, state: GameState, camera: LegacyCamera, shipX: number, shipY: number): void {
+    const discX = ship.custom.discfighterDiscX;
+    const discY = ship.custom.discfighterDiscY;
+    if (discX === undefined || discY === undefined) {
+      return;
+    }
+
+    const ctx = this.context;
+    const x = this.toScreenX(fixedToNumber(discX), camera);
+    const y = this.toScreenY(fixedToNumber(discY), camera);
+    const electrified = ship.secondaryCooldown > 0;
+    ctx.save();
+    ctx.globalCompositeOperation = electrified ? 'lighter' : 'source-over';
+    ctx.globalAlpha = electrified ? 0.85 : 0.72;
+    ctx.strokeStyle = electrified ? '#ffd0d0' : '#ff3030';
+    ctx.lineWidth = Math.max(1, (electrified ? 2.4 : 1.5) * camera.screenScale);
+    ctx.shadowColor = electrified ? '#ff3030' : 'transparent';
+    ctx.shadowBlur = electrified ? 18 * camera.screenScale : 0;
+    ctx.beginPath();
+    ctx.moveTo(shipX, shipY);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+
+    if (electrified) {
+      this.drawDiscfighterShockCorridor(ship, state, camera, shipX, shipY, x, y);
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.strokeStyle = '#ff4040';
+      ctx.shadowColor = '#ff2020';
+      ctx.shadowBlur = 12 * camera.screenScale;
+      ctx.globalAlpha = 0.35;
+      ctx.lineWidth = Math.max(1, 1 * camera.screenScale);
+      for (let index = 0; index < 5; index += 1) {
+        const phase = state.frame * 13 + ship.id * 29 + index * 17;
+        const sx = shipX + ((((phase * 37) % 121) - 60) * camera.scale);
+        const sy = shipY + ((((phase * 53) % 121) - 60) * camera.scale);
+        const dx = x + ((((phase * 67) % 121) - 60) * camera.scale);
+        const dy = y + ((((phase * 83) % 121) - 60) * camera.scale);
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(dx, dy);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  private drawDiscfighterShockCorridor(
+    ship: ShipState,
+    state: GameState,
+    camera: LegacyCamera,
+    shipX: number,
+    shipY: number,
+    discX: number,
+    discY: number,
+  ): void {
+    const ctx = this.context;
+    const dx = discX - shipX;
+    const dy = discY - shipY;
+    const length = Math.hypot(dx, dy);
+    if (length < 1) {
+      return;
+    }
+
+    const ux = dx / length;
+    const uy = dy / length;
+    const nx = -uy;
+    const ny = ux;
+    const halfWidth = DISCFIGHTER_SHOCK_HALF_WIDTH * camera.scale;
+    const cooldownRatio = Math.min(1, Math.max(0, ship.secondaryCooldown / 50));
+    const block = Math.max(3, Math.round(5 * camera.screenScale));
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 0.28 * cooldownRatio;
+    ctx.fillStyle = '#080000';
+    ctx.beginPath();
+    ctx.moveTo(shipX + nx * halfWidth, shipY + ny * halfWidth);
+    ctx.lineTo(discX + nx * halfWidth, discY + ny * halfWidth);
+    ctx.lineTo(discX - nx * halfWidth, discY - ny * halfWidth);
+    ctx.lineTo(shipX - nx * halfWidth, shipY - ny * halfWidth);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.translate(shipX, shipY);
+    ctx.rotate(Math.atan2(dy, dx));
+    for (let index = 0; index < 48; index += 1) {
+      const seed = (index * 91 + ship.id * 43 + state.frame * 7) % 997;
+      const px = ((seed * 37) % Math.max(1, Math.floor(length + block * 4))) - block * 2;
+      const lane = (((seed * 53) % Math.max(1, Math.floor(halfWidth * 2))) - halfWidth) / block;
+      const py = Math.round(lane) * block;
+      const wide = block * (1 + ((seed * 17) % 3));
+      ctx.globalAlpha = (seed % 5 === 0 ? 0.22 : 0.12) * cooldownRatio;
+      ctx.fillStyle = seed % 4 === 0 ? '#000000' : '#3a0000';
+      ctx.fillRect(px, py, wide, block);
+    }
+
+    ctx.globalCompositeOperation = 'lighter';
+    for (let index = 0; index < 36; index += 1) {
+      const seed = (index * 67 + ship.id * 101) % 997;
+      const progress = ((state.frame * 0.055 + seed / 997) % 1 + 1) % 1;
+      const lane = ((((seed * 41) % 1000) / 1000) * 2 - 1) * halfWidth * 0.88;
+      const px = progress * length;
+      const py = Math.round(lane / block) * block;
+      const dashLength = block * (2 + ((seed * 13) % 4));
+      const dashHeight = Math.max(2, block - 1);
+      const pulse = 0.4 + 0.6 * Math.sin(progress * Math.PI * 2 + seed);
+
+      ctx.globalAlpha = (0.2 + 0.55 * pulse) * cooldownRatio;
+      ctx.fillStyle = index % 4 === 0 ? '#ffd0d0' : '#ff3030';
+      ctx.fillRect(px - dashLength / 2, py - dashHeight / 2, dashLength, dashHeight);
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+    ctx.strokeStyle = '#ff2020';
+    ctx.shadowColor = '#ff2020';
+    ctx.shadowBlur = 10 * camera.screenScale;
+    ctx.lineWidth = Math.max(1, 2 * camera.screenScale);
+    ctx.globalAlpha = 0.32 + 0.38 * cooldownRatio;
+    ctx.beginPath();
+    ctx.moveTo(shipX + nx * halfWidth, shipY + ny * halfWidth);
+    ctx.lineTo(discX + nx * halfWidth, discY + ny * halfWidth);
+    ctx.moveTo(shipX - nx * halfWidth, shipY - ny * halfWidth);
+    ctx.lineTo(discX - nx * halfWidth, discY - ny * halfWidth);
+    ctx.stroke();
+
     ctx.restore();
   }
 
@@ -851,6 +1008,10 @@ export class CanvasRenderer {
       return GOOJ_JUNK_KEYS[Math.abs(projectile.variety ?? 0) % GOOJ_JUNK_KEYS.length];
     }
 
+    if (projectile.kind === 'krabShort') {
+      return 'frogShot';
+    }
+
     if (projectile.kind === 'kronPulse') {
       return pickKronBeamKey();
     }
@@ -867,6 +1028,10 @@ export class CanvasRenderer {
       return 'dukMissile';
     }
 
+    if (projectile.kind === 'discfighterDisc') {
+      return 'discfighterDisc';
+    }
+
     return fallback;
   }
 
@@ -881,11 +1046,19 @@ export class CanvasRenderer {
 
     if (projectile.kind === 'frogBubble') {
       const charge = Math.max(0, (fixedToNumber(projectile.radius) - 10) / 3);
-      return 0.1 * Math.sqrt(charge);
+      return FROG_MIN_BUBBLE_PROJECTILE_SCALE * Math.sqrt(charge);
+    }
+
+    if (projectile.kind === 'krabShort') {
+      return FROG_MIN_BUBBLE_PROJECTILE_SCALE;
     }
 
     if (projectile.kind === 'dukStunner' || projectile.kind === 'dukMissile') {
       return 0.6;
+    }
+
+    if (projectile.kind === 'discfighterDisc') {
+      return 0.2;
     }
 
     return fallback;

@@ -41,7 +41,7 @@ const SPEED_PRESETS = [
   { id: 'high', label: 'High', multiplier: 2 },
 ] as const;
 
-const CATALOG_PREVIEW_SHIP_IDS = ['frog', 'cannonade', 'zizlik', 'voskum', 'pscout', 'kron', 'gooj', 'krab', 'nurtip', 'duk'] as const satisfies readonly ShipCatalogId[];
+const CATALOG_PREVIEW_SHIP_IDS = ['frog', 'cannonade', 'zizlik', 'voskum', 'pscout', 'kron', 'gooj', 'krab', 'nurtip', 'duk', 'discfighter'] as const satisfies readonly ShipCatalogId[];
 const CATALOG_DIAGRAM_SCALE_MULTIPLIER = 2.4;
 const CATALOG_LIST_SCALE_MULTIPLIER = 0.42;
 const FLEET_PICKER_ART_SCALE_MULTIPLIER = 0.50;
@@ -289,6 +289,18 @@ const SHIP_CATALOG_METADATA: Record<CatalogPreviewShipId, ShipCatalogDisplayMeta
       { index: '02', title: 'Four-Round Rack', body: 'Missiles are visible on the hull and each secondary shot consumes one rack slot.', position: 'upper-right' },
       { index: '03', title: 'Freeze-On-Hit Payload', body: 'Stunner hits damage and freeze the target for a short duration.', position: 'lower-left' },
       { index: '04', title: 'Heavy Missile Payload', body: 'Secondary missiles are limited, costly in cooldown time, and hit hard.', position: 'lower-right' },
+    ],
+  },
+  discfighter: {
+    registryCode: 'SKP-NUM-011',
+    role: 'Remote disc and shock-line fighter',
+    primaryName: 'Remote Disc Launcher',
+    secondaryName: 'Disc Tether Shocker',
+    callouts: [
+      { index: '01', title: 'Docked Combat Disc', body: 'Primary launches one disc from the hull only while the disc is docked.', position: 'upper-left' },
+      { index: '02', title: 'Numinus Light Frame', body: 'Classic Frog-like handling with a compact hull and thirty crew.', position: 'upper-right' },
+      { index: '03', title: 'Hold-To-Thrust Control', body: 'Holding primary keeps the disc moving; releasing parks it in space.', position: 'lower-left' },
+      { index: '04', title: 'Line Shock Tether', body: 'Secondary shocks targets caught near the line between ship and deployed disc.', position: 'lower-right' },
     ],
   },
 };
@@ -1570,6 +1582,11 @@ function getUiShipLayers(shipId: ShipCatalogId, scaleMultiplier: number): readon
         { key: 'dukMissile', scale, offsetX: 13 * scaleMultiplier },
         { key: 'dukMissile', scale, offsetX: 25 * scaleMultiplier },
       ];
+    case 'discfighter':
+      return [
+        { key: 'discfighterShip', scale },
+        { key: 'discfighterDisc', scale, offsetX: -28 * scaleMultiplier },
+      ];
   }
 }
 
@@ -1620,6 +1637,8 @@ function getCatalogPrimaryReadout(shipId: CatalogPreviewShipId): string {
       return `Launches one remote torpedo for ${spec.primary.cost} fuel. The launcher stays armed until the missile is released, hits, expires, or is detonated.`;
     case 'duk':
       return `Fires a slightly inaccurate stunner for ${spec.primary.cost} fuel. It starts nearly inert, ramps up over time, and briefly freezes on hit.`;
+    case 'discfighter':
+      return `Launches one remote disc for ${spec.primary.cost} fuel. Hold primary to keep it thrusting, release to park it, then press again to dock.`;
   }
 }
 
@@ -1648,6 +1667,8 @@ function getCatalogSecondaryReadout(shipId: CatalogPreviewShipId): string {
       const missileCount = 4;
       return `Costs ${spec.secondary.cost} fuel to launch one rack missile, with ${missileCount} missiles available per ship. Recycles in ${spec.secondary.framesPerShot}f.`;
     }
+    case 'discfighter':
+      return `Costs ${spec.secondary.cost} fuel to shock targets near the tether line from ship to deployed disc. Recycles in ${spec.secondary.framesPerShot}f.`;
   }
 }
 
@@ -1832,6 +1853,33 @@ function getCatalogWeaponStats(shipId: CatalogPreviewShipId): {
             stackedBars: [
               { label: 'Stunner', value: spec.primary.damage, max: 10, display: `${spec.primary.damage}+freeze` },
               { label: 'Missile', value: spec.secondary.damage, max: 10, display: String(spec.secondary.damage) },
+            ],
+          },
+        ],
+      };
+    }
+    case 'discfighter': {
+      const controlRange = 900;
+      return {
+        range: {
+          label: 'Weapon Range',
+          value: controlRange,
+          max: 3000,
+          display: `${controlRange}u control / tether`,
+          stackedBars: [
+            { label: 'Disc Control', value: controlRange, max: 3000, display: `${controlRange}u` },
+            { label: 'Shock Tether', value: controlRange, max: 3000, display: 'disc line' },
+          ],
+        },
+        damage: [
+          {
+            label: 'Weapon Damage',
+            value: spec.primary.damage,
+            max: 8,
+            display: `${spec.primary.damage} / ${spec.secondary.damage}`,
+            stackedBars: [
+              { label: 'Disc', value: spec.primary.damage, max: 8, display: String(spec.primary.damage) },
+              { label: 'Shock', value: spec.secondary.damage, max: 8, display: String(spec.secondary.damage) },
             ],
           },
         ],

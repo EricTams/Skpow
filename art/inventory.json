@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-05-09T17:25:24.139Z",
+  "generatedAt": "2026-05-09T19:54:13.620Z",
   "root": "art",
-  "fileCount": 85,
+  "fileCount": 89,
   "files": [
     {
       "name": "admiral.jpg",
@@ -127,6 +127,20 @@
       "ext": ".png",
       "relativePath": "art/dethbeam.png",
       "sizeBytes": 5235,
+      "kind": "image"
+    },
+    {
+      "name": "disc.png",
+      "ext": ".png",
+      "relativePath": "art/disc.png",
+      "sizeBytes": 23398,
+      "kind": "image"
+    },
+    {
+      "name": "discfighter.png",
+      "ext": ".png",
+      "relativePath": "art/discfighter.png",
+      "sizeBytes": 81721,
       "kind": "image"
     },
     {
@@ -330,6 +344,20 @@
       "ext": ".png",
       "relativePath": "art/nameglass.png",
       "sizeBytes": 6797,
+      "kind": "image"
+    },
+    {
+      "name": "numinusname.png",
+      "ext": ".png",
+      "relativePath": "art/numinusname.png",
+      "sizeBytes": 4067,
+      "kind": "image"
+    },
+    {
+      "name": "numinusportrait.jpg",
+      "ext": ".jpg",
+      "relativePath": "art/numinusportrait.jpg",
+      "sizeBytes": 25294,
       "kind": "image"
     },
     {

@@ -42,6 +42,30 @@ describe('reference-style AI input', () => {
     expect(matchingVelocityInput & InputBits.TurnRight).toBe(0);
   });
 
+  it('varies led steering over deterministic lead segments', () => {
+    const state = withShips(createInitialState(123, ['cannonade', 'frog']), [
+      { id: 0, x: fixedFromInt(500), y: fixedFromInt(600), vx: fixed(0), vy: fixed(2), angle: angle(128) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(600), vx: fixed(0), vy: fixed(0), angle: angle(11) },
+    ]);
+
+    const earlyInput = getAiInput({ ...state, frame: 0 }, 1);
+    const laterInput = getAiInput({ ...state, frame: 293 }, 1);
+
+    expect(earlyInput & InputBits.TurnLeft).toBe(InputBits.TurnLeft);
+    expect(earlyInput & InputBits.TurnRight).toBe(0);
+    expect(laterInput & InputBits.TurnRight).toBe(InputBits.TurnRight);
+    expect(laterInput & InputBits.TurnLeft).toBe(0);
+  });
+
+  it('keeps AI lead choices deterministic for the same frame', () => {
+    const state = withShips(createInitialState(123, ['cannonade', 'frog']), [
+      { id: 0, x: fixedFromInt(500), y: fixedFromInt(600), vx: fixed(0), vy: fixed(2), angle: angle(128) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(600), vx: fixed(0), vy: fixed(0), angle: angle(11) },
+    ]);
+
+    expect(getAiInput({ ...state, frame: 293 }, 1)).toBe(getAiInput({ ...state, frame: 293 }, 1));
+  });
+
   it('fires when the opponent is close and aligned', () => {
     const state = withShips(createInitialState(123), [
       { id: 0, x: fixedFromInt(400), y: fixedFromInt(0), angle: angle(128) },
@@ -73,6 +97,19 @@ describe('reference-style AI input', () => {
     const input = getAiInput(state, 1);
 
     expect(input & InputBits.FirePrimary).toBe(InputBits.FirePrimary);
+  });
+
+  it('varies led Zizlik firing over deterministic lead segments', () => {
+    const state = withShips(createInitialState(123, ['frog', 'zizlik']), [
+      { id: 0, x: fixedFromInt(90), y: fixedFromInt(400), vx: fixed(-2), vy: fixed(0), angle: angle(128) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), vx: fixed(0), vy: fixed(0), angle: angle(64) },
+    ]);
+
+    const earlyInput = getAiInput({ ...state, frame: 0 }, 1);
+    const laterInput = getAiInput({ ...state, frame: 293 }, 1);
+
+    expect(earlyInput & InputBits.FirePrimary).toBe(0);
+    expect(laterInput & InputBits.FirePrimary).toBe(InputBits.FirePrimary);
   });
 
   it('does not fire Zizlik outside its vertical shot corridor', () => {
@@ -275,6 +312,50 @@ describe('reference-style AI input', () => {
     const state = withShips(createInitialState(123, ['frog', 'duk']), [
       { id: 0, x: fixedFromInt(700), y: fixedFromInt(0), angle: angle(128), vx: fixed(0), vy: fixed(0) },
       { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), battery: 16, custom: { dukMissileCount: 0 } },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FireSecondary).toBe(0);
+  });
+
+  it('fires Discfighter secondary when the disc is beyond the enemy on the same bearing', () => {
+    const state = withShips(createInitialState(123, ['frog', 'discfighter']), [
+      { id: 0, x: fixedFromInt(400), y: fixedFromInt(0), angle: angle(128), vx: fixed(0), vy: fixed(0) },
+      {
+        id: 1,
+        x: fixedFromInt(0),
+        y: fixedFromInt(0),
+        angle: angle(0),
+        battery: 30,
+        custom: {
+          discfighterDiscState: 'waiting',
+          discfighterDiscX: fixedFromInt(800),
+          discfighterDiscY: fixedFromInt(0),
+        },
+      },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FireSecondary).toBe(InputBits.FireSecondary);
+  });
+
+  it('holds Discfighter secondary when the disc is off the enemy bearing', () => {
+    const state = withShips(createInitialState(123, ['frog', 'discfighter']), [
+      { id: 0, x: fixedFromInt(400), y: fixedFromInt(0), angle: angle(128), vx: fixed(0), vy: fixed(0) },
+      {
+        id: 1,
+        x: fixedFromInt(0),
+        y: fixedFromInt(0),
+        angle: angle(0),
+        battery: 30,
+        custom: {
+          discfighterDiscState: 'waiting',
+          discfighterDiscX: fixedFromInt(800),
+          discfighterDiscY: fixedFromInt(300),
+        },
+      },
     ]);
 
     const input = getAiInput(state, 1);
