@@ -247,8 +247,10 @@ function shouldShuggFire(shotAim: AimSolution, shotDelta: number, shotTolerance:
 
 // Nurtip primary is a remote-detonate torpedo: tap to launch, hold while it cruises, release for AOE.
 // We launch when in firing position (no missile out), hold while the missile isn't yet on top of the
-// enemy, and release once it's inside its 150-radius detonation envelope.
+// enemy, and release once it's inside its 150-radius detonation envelope unless a direct hit is likely.
 const NURTIP_AI_RELEASE_RADIUS = 130;
+const NURTIP_AI_DIRECT_HIT_LOOKAHEAD_FRAMES = 45;
+const NURTIP_AI_DIRECT_HIT_MARGIN = 8;
 
 function shouldNurtipFire(ship: ShipState, enemy: ShipState, state: GameState, inFiringPosition: boolean): boolean {
   if (!ship.custom.nurtipPrimaryArmed) {
@@ -267,7 +269,38 @@ function shouldNurtipFire(ship: ShipState, enemy: ShipState, state: GameState, i
   const arenaHeight = fixedToNumber(state.arena.height);
   const dx = getWrappedDelta(fixedToNumber(enemy.x) - fixedToNumber(missile.x), arenaWidth);
   const dy = getWrappedDelta(fixedToNumber(enemy.y) - fixedToNumber(missile.y), arenaHeight);
-  return Math.hypot(dx, dy) > NURTIP_AI_RELEASE_RADIUS;
+  if (Math.hypot(dx, dy) > NURTIP_AI_RELEASE_RADIUS) {
+    return true;
+  }
+
+  return isNurtipDirectHitLikely(missile, enemy, dx, dy);
+}
+
+function isNurtipDirectHitLikely(
+  missile: GameState['projectiles'][number],
+  enemy: ShipState,
+  dx: number,
+  dy: number,
+): boolean {
+  const relativeVx = fixedToNumber(enemy.vx) - fixedToNumber(missile.vx);
+  const relativeVy = fixedToNumber(enemy.vy) - fixedToNumber(missile.vy);
+  const relativeSpeedSq = relativeVx * relativeVx + relativeVy * relativeVy;
+  if (relativeSpeedSq <= 0) {
+    return false;
+  }
+
+  const timeToClosest = -((dx * relativeVx + dy * relativeVy) / relativeSpeedSq);
+  const lookaheadFrames = Math.min(missile.ttl, NURTIP_AI_DIRECT_HIT_LOOKAHEAD_FRAMES);
+  if (timeToClosest < 0 || timeToClosest > lookaheadFrames) {
+    return false;
+  }
+
+  const closestDx = dx + relativeVx * timeToClosest;
+  const closestDy = dy + relativeVy * timeToClosest;
+  const directHitRadius =
+    fixedToNumber(missile.radius) + fixedToNumber(getShipSpec(enemy.shipId).radius) + NURTIP_AI_DIRECT_HIT_MARGIN;
+
+  return closestDx * closestDx + closestDy * closestDy <= directHitRadius * directHitRadius;
 }
 
 function getPlanetAvoidanceAim(ship: ShipState, state: GameState, pursuitAim: AimSolution): Angle | null {
@@ -471,7 +504,7 @@ function shouldUseSpecial(
       return shouldPScoutUseSpecial(ship, enemy, state);
     case 'nurtip':
       // Reference Nurtip::TryUseSpecial pops a rock at random with low odds (~1/1000 frames).
-      return distance < 600;
+      return ship.battery > ship.maxBattery / 2 && distance < 600;
     case 'duk':
       return shouldDukUseSpecial(ship, enemy, distance, state, leadScale);
     case 'discfighter':

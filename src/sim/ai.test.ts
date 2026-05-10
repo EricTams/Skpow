@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { fixed, fixedFromInt } from './fixed';
+import { fixed, fixedFromInt, type Fixed } from './fixed';
 import { getAiInput } from './ai';
 import { createInitialState } from './state';
 import { angle } from './trig';
-import { InputBits, type ActorState, type GameState, type ShipState } from './types';
+import { InputBits, type ActorState, type GameState, type ProjectileState, type ShipState } from './types';
 
 describe('reference-style AI input', () => {
   it('always thrusts while the AI ship is alive', () => {
@@ -464,6 +464,78 @@ describe('reference-style AI input', () => {
     expect(input & InputBits.FirePrimary).toBe(InputBits.FirePrimary);
   });
 
+  it('keeps holding the Nurtip primary when a direct missile hit is likely', () => {
+    const state = withProjectiles(
+      withShips(createInitialState(123, ['frog', 'nurtip']), [
+        { id: 0, x: fixedFromInt(100), y: fixedFromInt(0), angle: angle(128) },
+        { id: 1, x: fixedFromInt(-500), y: fixedFromInt(0), angle: angle(0), custom: { nurtipPrimaryArmed: true } },
+      ]),
+      [
+        buildProjectile({
+          ownerId: 1,
+          kind: 'nurtipMissile',
+          x: fixedFromInt(-20),
+          y: fixedFromInt(0),
+          vx: fixed(4),
+          vy: fixed(0),
+          damage: 6,
+          radius: fixedFromInt(15),
+        }),
+      ],
+    );
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FirePrimary).toBe(InputBits.FirePrimary);
+  });
+
+  it('releases the Nurtip primary inside AOE range when a direct hit is unlikely', () => {
+    const state = withProjectiles(
+      withShips(createInitialState(123, ['frog', 'nurtip']), [
+        { id: 0, x: fixedFromInt(100), y: fixedFromInt(0), angle: angle(128) },
+        { id: 1, x: fixedFromInt(-500), y: fixedFromInt(0), angle: angle(0), custom: { nurtipPrimaryArmed: true } },
+      ]),
+      [
+        buildProjectile({
+          ownerId: 1,
+          kind: 'nurtipMissile',
+          x: fixedFromInt(0),
+          y: fixedFromInt(80),
+          vx: fixed(4),
+          vy: fixed(0),
+          damage: 6,
+          radius: fixedFromInt(15),
+        }),
+      ],
+    );
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FirePrimary).toBe(0);
+  });
+
+  it('holds Nurtip special when power is at or below half', () => {
+    const state = withShips(createInitialState(123, ['frog', 'nurtip']), [
+      { id: 0, x: fixedFromInt(400), y: fixedFromInt(0), angle: angle(128) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), battery: 18 },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FireSecondary).toBe(0);
+  });
+
+  it('uses Nurtip special in range when power is over half', () => {
+    const state = withShips(createInitialState(123, ['frog', 'nurtip']), [
+      { id: 0, x: fixedFromInt(400), y: fixedFromInt(0), angle: angle(128) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), battery: 19 },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FireSecondary).toBe(InputBits.FireSecondary);
+  });
+
   it('does not release the Bolter primary before its minimum charge time', () => {
     const charging = withShips(createInitialState(123, ['cannonade', 'bolter']), [
       { id: 0, x: fixedFromInt(250), y: fixedFromInt(0), angle: angle(128) },
@@ -580,6 +652,42 @@ function withActors(state: GameState, actors: readonly ActorState[]): GameState 
   return {
     ...state,
     actors: [...state.actors, ...actors],
+  };
+}
+
+function withProjectiles(state: GameState, projectiles: readonly ProjectileState[]): GameState {
+  return {
+    ...state,
+    projectiles: [...state.projectiles, ...projectiles],
+  };
+}
+
+function buildProjectile(options: {
+  readonly ownerId: number;
+  readonly kind: ProjectileState['kind'];
+  readonly x: Fixed;
+  readonly y: Fixed;
+  readonly vx: Fixed;
+  readonly vy: Fixed;
+  readonly damage: number;
+  readonly radius: Fixed;
+}): ProjectileState {
+  return {
+    id: 99,
+    ownerId: options.ownerId,
+    kind: options.kind,
+    x: options.x,
+    y: options.y,
+    vx: options.vx,
+    vy: options.vy,
+    angle: angle(0),
+    ttl: 100,
+    damage: options.damage,
+    radius: options.radius,
+    rotation: fixed(0),
+    trackPct: fixed(0),
+    variety: 0,
+    active: true,
   };
 }
 
