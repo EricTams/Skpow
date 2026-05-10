@@ -243,6 +243,64 @@ export const SHIP_CATALOG: readonly ShipCatalogEntry[] = [
       shipScale: 0.6,
     },
   },
+  {
+    id: 'doubleship',
+    name: 'Loobee',
+    cost: 20,
+    crew: SHIP_SPECS.doubleship.crew,
+    battery: SHIP_SPECS.doubleship.battery,
+    render: {
+      spriteKey: 'doubleshipShip',
+      scale: 1.2,
+      projectileKey: 'doubleshipBeam1',
+      projectileScale: 1.2,
+    },
+    hud: {
+      nameKey: 'doubleshipName',
+      portraitKey: 'doubleshipPortrait',
+      shipKey: 'doubleshipShip',
+      shipScale: 3.6,
+    },
+  },
+  {
+    id: 'bolter',
+    name: 'Metaphyte',
+    cost: 30,
+    crew: SHIP_SPECS.bolter.crew,
+    battery: SHIP_SPECS.bolter.battery,
+    render: {
+      spriteKey: 'bolterShip',
+      scale: 0.4,
+      projectileKey: 'bolterShot',
+      projectileScale: 0.4,
+    },
+    hud: {
+      nameKey: 'bolterName',
+      portraitKey: 'bolterPortrait',
+      shipKey: 'bolterShip',
+      shipOverlayKey: 'bolterOverlay',
+      shipScale: 1.2,
+    },
+  },
+  {
+    id: 'shugg',
+    name: 'Shugg',
+    cost: 24,
+    crew: SHIP_SPECS.shugg.crew,
+    battery: SHIP_SPECS.shugg.battery,
+    render: {
+      spriteKey: 'shuggShip',
+      scale: 0.6,
+      projectileKey: 'shuggShot',
+      projectileScale: 1.0,
+    },
+    hud: {
+      nameKey: 'shuggName',
+      portraitKey: 'shuggPortrait',
+      shipKey: 'shuggShip',
+      shipScale: 1.35,
+    },
+  },
 ] as const;
 
 export const DEFAULT_MATCH_SHIPS: readonly [ShipCatalogId, ShipCatalogId] = ['frog', 'cannonade'];

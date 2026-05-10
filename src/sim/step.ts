@@ -43,6 +43,14 @@ const FROG_CHARGE_INTERVAL = 50;
 const KRON_SCAN_STEPS = 32;
 const KRON_SCAN_SPACING = fixedFromInt(10);
 const KRON_FREEZE_FRAMES = 150;
+const DOUBLESHIP_SCAN_STEPS = 32;
+const DOUBLESHIP_SCAN_SPACING = fixedFromInt(10);
+const DOUBLESHIP_LANE_OFFSET = fixedFromInt(15);
+const DOUBLESHIP_WING_RESTORE_RADIANS = 0.15;
+const DOUBLESHIP_SPECIAL_RADIUS = fixedFromInt(300);
+const BOLTER_MAX_CHARGE = 40;
+const BOLTER_CHARGE_INTERVAL = 5;
+const BOLTER_BLOSSOM_TURN_STEPS = Math.round((0.65 / (Math.PI * 2)) * ANGLE_STEPS);
 const VOSKUM_BLINK_DISTANCE = fixedFromInt(250);
 const VOSKUM_TELEPORT_VISUAL_FRAMES = 24;
 const VOSKUM_TELEPORT_IMPRINT_COUNT = 9;
@@ -60,6 +68,20 @@ const DUK_STUNNER_SLOW_TTL = 700;
 const DUK_STUNNER_RAMP_FRAMES = 300;
 const DUK_STUNNER_FULL_SPEED_TTL = DUK_STUNNER_SLOW_TTL + DUK_STUNNER_RAMP_FRAMES;
 const DUK_LEGACY_LIFE_DECAY = 3;
+const SHUGG_PRIMARY_BURST_COUNT = 3;
+const SHUGG_PRIMARY_MIN_DISTANCE = 400;
+const SHUGG_PRIMARY_DISTANCE_RANGE = 400;
+const SHUGG_PRIMARY_SCATTER_RANGE = 100;
+const SHUGG_BURST_LIFE = 27;
+const SHUGG_BURST_DRIFT_SPEED = fixed(2);
+const SHUGG_SECONDARY_POD_COUNT = 2;
+const SHUGG_SECONDARY_OFFSET = fixedFromInt(20);
+const SHUGG_SECONDARY_ANGLE_START = -1.57;
+const SHUGG_SECONDARY_ANGLE_STEP = 0.77;
+const SHUGG_SECONDARY_FACING_SCALE = 0.1;
+const SHUGG_POD_BOUNCE = 0.9;
+const SHUGG_POD_MAX_SCRAMBLE_RADIANS = 0.2;
+const SHUGG_POD_SHOVE_SPEED = fixed(1.15);
 const PSCOUT_BEAM_FRAMES = 200;
 const PSCOUT_BEAM_DAMAGE_FRAME = 50;
 const DISCFIGHTER_DISC_STALE_FRAMES = 40;
@@ -114,10 +136,13 @@ interface FreezeEffect {
   readonly frames: number;
 }
 
+type PendingEffect = Omit<EffectState, 'id'>;
+
 interface ShipStepResult {
   readonly ship: ShipState;
   readonly actors: readonly ActorState[];
   readonly projectiles: readonly ProjectileState[];
+  readonly effects: readonly PendingEffect[];
   readonly damageEffects: readonly DamageEffect[];
   readonly freezeEffects: readonly FreezeEffect[];
   readonly clearEnemyBeacons?: number;
@@ -143,6 +168,7 @@ export function stepGame(state: GameState, inputs: FrameInputs): GameState {
   let rngSeed = state.rngSeed;
   const spawned: ProjectileState[] = [];
   const spawnedActors: ActorState[] = [];
+  const pendingWeaponEffects: PendingEffect[] = [];
   const damageEffects: DamageEffect[] = [];
   const freezeEffects: FreezeEffect[] = [];
   const clearBeaconsFor = new Set<number>();
@@ -152,6 +178,7 @@ export function stepGame(state: GameState, inputs: FrameInputs): GameState {
   const ships = state.ships.map((ship, index) => {
     const result = stepShip(ship, inputs[index] ?? 0, state, rngSeed, nextProjectileId, nextActorId);
     spawnedActors.push(...result.actors);
+    pendingWeaponEffects.push(...result.effects);
     const ownerProjectiles = assignOwnerProjectileIds(result.projectiles, ship.id, nextProjectileId);
     spawned.push(...ownerProjectiles.projectiles);
     damageEffects.push(...result.damageEffects);
@@ -172,6 +199,12 @@ export function stepGame(state: GameState, inputs: FrameInputs): GameState {
     nextActorId = result.nextActorId;
     return result.ship;
   });
+
+  const weaponEffects: EffectState[] = [];
+  for (const effect of pendingWeaponEffects) {
+    weaponEffects.push({ ...effect, id: nextEffectId });
+    nextEffectId += 1;
+  }
 
   const thrustDustEffects: EffectState[] = [];
   for (let index = 0; index < ships.length; index += 1) {
@@ -229,6 +262,7 @@ export function stepGame(state: GameState, inputs: FrameInputs): GameState {
   }
   const effects = [
     ...stepEffects(state.effects, state.arena),
+    ...weaponEffects,
     ...thrustDustEffects,
     ...deathSpawn.effects,
     ...nurtipExplosionEffects,
@@ -394,6 +428,7 @@ function stepShip(
   let custom = { ...ship.custom };
   const projectiles: ProjectileState[] = [];
   const actors: ActorState[] = [];
+  const effects: PendingEffect[] = [];
   const damageEffects: DamageEffect[] = [];
   const freezeEffects: FreezeEffect[] = [];
   const removedProjectileIds: number[] = [];
@@ -414,6 +449,59 @@ function stepShip(
 
   if (ship.shipId === 'discfighter') {
     custom = syncDiscfighterDiscState(ship, custom, state);
+  }
+
+  if (ship.shipId === 'doubleship') {
+    custom = updateDoubleShipWingState(custom);
+  }
+
+  if (ship.shipId === 'bolter' && custom.bolterBlossomActive) {
+    const blossomTime = (custom.bolterBlossomTime ?? 0) + 1;
+    shipAngle = turn(shipAngle, BOLTER_BLOSSOM_TURN_STEPS);
+    x = wrapSignedFixed(fixedAdd(x, fixedMul(vx, fixed(0.5))), state.arena.width);
+    y = wrapSignedFixed(fixedAdd(y, fixedMul(vy, fixed(0.5))), state.arena.height);
+
+    if (battery > 0) {
+      projectiles.push(spawn(nextProjectileId, ship.id, activeSpec.secondary, x, y, shipAngle, state, vx, vy));
+      nextProjectileId += 1;
+      if (blossomTime % BOLTER_CHARGE_INTERVAL === 0) {
+        battery = Math.max(0, battery - 1);
+      }
+    }
+
+    custom = {
+      ...custom,
+      bolterBlossomActive: battery > 0,
+      bolterBlossomTime: battery > 0 ? blossomTime : 0,
+      bolterCharge: 0,
+      bolterChargeTime: 0,
+    };
+
+    return {
+      ship: {
+        ...ship,
+        x,
+        y,
+        vx,
+        vy,
+        angle: shipAngle,
+        crew: Math.max(0, ship.crew),
+        battery,
+        batteryChargeFrame: ship.batteryChargeFrame,
+        primaryCooldown,
+        secondaryCooldown,
+        freezeFrames,
+        custom,
+      },
+      actors,
+      projectiles,
+      effects,
+      damageEffects,
+      freezeEffects,
+      rngSeed,
+      nextProjectileId,
+      nextActorId,
+    };
   }
 
   if (batteryChargeFrame >= baseSpec.batteryChargeFrames) {
@@ -547,6 +635,7 @@ function stepShip(
     });
     projectiles.push(...result.projectiles);
     actors.push(...result.actors);
+    effects.push(...result.effects);
     damageEffects.push(...result.damageEffects);
     battery = result.battery;
     primaryCooldown = result.primaryCooldown;
@@ -580,6 +669,33 @@ function stepShip(
     custom = { ...custom, frogCharge: 0, frogChargeTime: 0 };
   } else if (ship.shipId === 'frog') {
     custom = { ...custom, frogChargeTime: 0 };
+  } else if (ship.shipId === 'bolter' && (custom.bolterCharge ?? 0) > 0 && primaryCooldown === 0) {
+    const charge = custom.bolterCharge ?? 0;
+    const shotSpeed = fixed(5 + 0.2 * charge);
+    projectiles.push(
+      scaleProjectileMotion(
+        createProjectile(
+          nextProjectileId,
+          ship.id,
+          'bolterShot',
+          x,
+          y,
+          shipAngle,
+          shotSpeed,
+          32 + 3 * charge,
+          activeSpec.primary.damage,
+          activeSpec.primary.radius,
+        ),
+        state,
+        projectileInheritedVx,
+        projectileInheritedVy,
+      ),
+    );
+    nextProjectileId += 1;
+    primaryCooldown = activeSpec.primary.framesPerShot;
+    custom = { ...custom, bolterCharge: 0, bolterChargeTime: 0 };
+  } else if (ship.shipId === 'bolter') {
+    custom = { ...custom, bolterChargeTime: 0 };
   } else if (ship.shipId === 'discfighter' && custom.discfighterDiscState === 'thrusting') {
     custom = { ...custom, discfighterDiscState: 'waiting' };
   } else if (ship.shipId === 'nurtip' && custom.nurtipPrimaryArmed) {
@@ -609,7 +725,20 @@ function stepShip(
     custom = updateVoskumTeleportVisual(custom, x, y, shipAngle, state);
   }
 
-  if ((input & InputBits.FireSecondary) !== 0) {
+  if (
+    ship.shipId === 'doubleship' &&
+    (input & InputBits.FireSecondary) !== 0 &&
+    secondaryCooldown === 0 &&
+    battery >= activeSpec.secondary.cost
+  ) {
+    vx = fixedMul(vx, fixed(-1));
+    vy = fixedMul(vy, fixed(-1));
+    shipAngle = turn(shipAngle, ANGLE_STEPS / 2);
+    custom = { ...custom, doubleLeftAngle: -Math.PI, doubleRightAngle: Math.PI };
+    damageEffects.push(...getDoubleShipSpecialDamageEffects(ship, x, y, state, activeSpec.secondary.damage));
+    battery -= activeSpec.secondary.cost;
+    secondaryCooldown = activeSpec.secondary.framesPerShot;
+  } else if ((input & InputBits.FireSecondary) !== 0) {
     const result = fireSecondary(ship, activeSpec, state, {
       x,
       y,
@@ -660,6 +789,7 @@ function stepShip(
     },
     actors,
     projectiles,
+    effects,
     damageEffects,
     freezeEffects,
     clearEnemyBeacons,
@@ -676,6 +806,7 @@ function emptyShipResult(ship: ShipState, rngSeed: RngSeed, nextProjectileId: nu
     ship,
     actors: [],
     projectiles: [],
+    effects: [],
     damageEffects: [],
     freezeEffects: [],
     rngSeed,
@@ -709,6 +840,12 @@ function syncDiscfighterDiscState(ship: ShipState, custom: ShipState['custom'], 
 
 function getDiscfighterDisc(projectiles: readonly ProjectileState[], ownerId: number): ProjectileState | undefined {
   return projectiles.find((projectile) => projectile.active && projectile.kind === 'discfighterDisc' && projectile.ownerId === ownerId);
+}
+
+function updateDoubleShipWingState(custom: ShipState['custom']): ShipState['custom'] {
+  const leftAngle = Math.min(0, (custom.doubleLeftAngle ?? 0) + DOUBLESHIP_WING_RESTORE_RADIANS);
+  const rightAngle = Math.max(0, (custom.doubleRightAngle ?? 0) - DOUBLESHIP_WING_RESTORE_RADIANS);
+  return { ...custom, doubleLeftAngle: leftAngle, doubleRightAngle: rightAngle };
 }
 
 function updateVoskumTeleportVisual(
@@ -912,6 +1049,9 @@ export function stepProjectile(projectile: ProjectileState, state: GameState, rn
   if (projectile.kind === 'dukStunner') {
     return updateDukStunner(projectile, state, rngSeed);
   }
+  if (projectile.kind === 'shuggPod') {
+    return updateShuggPod(projectile, state);
+  }
   if (projectile.kind === 'discfighterDisc') {
     return updateDiscfighterDisc(projectile, state);
   }
@@ -979,6 +1119,49 @@ function updateDukStunner(projectile: ProjectileState, state: GameState, rngSeed
     ttl,
     rotation: fixedAdd(steered.rotation, fixed(0.2)),
     active: !isInsidePlanet(x, y, state.planet.radius, state),
+  };
+}
+
+function updateShuggPod(projectile: ProjectileState, state: GameState): ProjectileState {
+  const ttl = projectile.ttl - 1;
+  if (ttl < 1) {
+    return { ...projectile, ttl, active: false };
+  }
+
+  let x = wrapSignedFixed(fixedAdd(projectile.x, projectile.vx), state.arena.width);
+  let y = wrapSignedFixed(fixedAdd(projectile.y, projectile.vy), state.arena.height);
+  let vx = projectile.vx;
+  let vy = projectile.vy;
+  const planetRadius = fixedToNumber(state.planet.radius) + fixedToNumber(projectile.radius);
+  const dx = fixedToNumber(fixedSub(x, state.planet.x));
+  const dy = fixedToNumber(fixedSub(y, state.planet.y));
+  const distance = Math.hypot(dx, dy);
+
+  if (distance > 0 && distance <= planetRadius) {
+    const normalX = dx / distance;
+    const normalY = dy / distance;
+    const velocityX = fixedToNumber(vx);
+    const velocityY = fixedToNumber(vy);
+    const dot = velocityX * normalX + velocityY * normalY;
+    vx = fixed((velocityX - 2 * dot * normalX) * SHUGG_POD_BOUNCE);
+    vy = fixed((velocityY - 2 * dot * normalY) * SHUGG_POD_BOUNCE);
+    x = wrapSignedFixed(fixedAdd(state.planet.x, fixed(planetRadius * normalX)), state.arena.width);
+    y = wrapSignedFixed(fixedAdd(state.planet.y, fixed(planetRadius * normalY)), state.arena.height);
+  } else if (distance === 0 && isInsidePlanet(x, y, state.planet.radius, state)) {
+    vx = fixedMul(vx, fixed(-SHUGG_POD_BOUNCE));
+    vy = fixedMul(vy, fixed(-SHUGG_POD_BOUNCE));
+  }
+
+  return {
+    ...projectile,
+    x,
+    y,
+    vx,
+    vy,
+    angle: angle(Math.round((Math.atan2(fixedToNumber(vy), fixedToNumber(vx)) / (Math.PI * 2)) * ANGLE_STEPS)),
+    ttl,
+    rotation: fixedAdd(projectile.rotation, fixed(0.2)),
+    active: true,
   };
 }
 
@@ -1276,6 +1459,7 @@ function firePrimary(
 ): {
   readonly actors: readonly ActorState[];
   readonly projectiles: readonly ProjectileState[];
+  readonly effects: readonly PendingEffect[];
   readonly damageEffects: readonly DamageEffect[];
   readonly battery: number;
   readonly primaryCooldown: number;
@@ -1287,11 +1471,12 @@ function firePrimary(
   let { battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId } = context;
   const actors: ActorState[] = [];
   const projectiles: ProjectileState[] = [];
+  const effects: PendingEffect[] = [];
   const damageEffects: DamageEffect[] = [];
 
   if (ship.shipId === 'frog') {
     if (primaryCooldown !== 0) {
-      return { actors, projectiles, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
+      return { actors, projectiles, effects, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
     }
     let charge = custom.frogCharge ?? 0;
     const chargeTime = custom.frogChargeTime ?? 0;
@@ -1300,11 +1485,30 @@ function firePrimary(
       battery -= 1;
     }
     custom = { ...custom, frogCharge: charge, frogChargeTime: chargeTime + 1 };
-    return { actors, projectiles, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
+    return { actors, projectiles, effects, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
+  }
+
+  if (ship.shipId === 'bolter') {
+    if (primaryCooldown !== 0) {
+      return { actors, projectiles, effects, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
+    }
+    let charge = custom.bolterCharge ?? 0;
+    const chargeTime = custom.bolterChargeTime ?? 0;
+    if (charge === 0 && battery < spec.primary.cost) {
+      return { actors, projectiles, effects, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
+    }
+    if (chargeTime % BOLTER_CHARGE_INTERVAL === 0 && charge < BOLTER_MAX_CHARGE) {
+      if (charge === 0) {
+        battery -= spec.primary.cost;
+      }
+      charge += 1;
+    }
+    custom = { ...custom, bolterCharge: charge, bolterChargeTime: chargeTime + 1 };
+    return { actors, projectiles, effects, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
   }
 
   if (primaryCooldown !== 0 || battery < spec.primary.cost) {
-    return { actors, projectiles, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
+    return { actors, projectiles, effects, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
   }
 
   switch (ship.shipId) {
@@ -1335,6 +1539,21 @@ function firePrimary(
       if (enemy && isKronBeamHitting(context.x, context.y, context.shipAngle, enemy, state)) {
         damageEffects.push({ targetId: enemy.id, sourceId: ship.id, damage: spec.primary.damage });
       }
+      break;
+    }
+    case 'doubleship': {
+      if ((custom.doubleLeftAngle ?? 0) !== 0 || (custom.doubleRightAngle ?? 0) !== 0) {
+        return { actors, projectiles, effects, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
+      }
+      const left = getDoubleShipLaserHit(ship, context.x, context.y, context.shipAngle, 1, state);
+      const right = getDoubleShipLaserHit(ship, context.x, context.y, context.shipAngle, -1, state);
+      if (left.target) {
+        damageEffects.push({ targetId: left.target.id, sourceId: ship.id, damage: spec.primary.damage });
+      }
+      if (right.target) {
+        damageEffects.push({ targetId: right.target.id, sourceId: ship.id, damage: spec.primary.damage });
+      }
+      custom = { ...custom, doubleLeftPct: left.pct, doubleRightPct: right.pct };
       break;
     }
     case 'gooj': {
@@ -1374,7 +1593,7 @@ function firePrimary(
     case 'nurtip':
       // Reference Nurtip::ShootMainWeapon: launch a slow torpedo and lock out new shots until released.
       if (custom.nurtipPrimaryArmed) {
-        return { actors, projectiles, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
+        return { actors, projectiles, effects, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
       }
       projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, context.x, context.y, context.shipAngle, state, context.vx, context.vy));
       nextProjectileId += 1;
@@ -1382,7 +1601,7 @@ function firePrimary(
       break;
     case 'discfighter':
       if (custom.discfighterDiscState !== 'docked') {
-        return { actors, projectiles, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
+        return { actors, projectiles, effects, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
       }
       projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, context.x, context.y, context.shipAngle, state, 0 as Fixed, 0 as Fixed));
       nextProjectileId += 1;
@@ -1404,6 +1623,13 @@ function firePrimary(
       nextProjectileId += 1;
       break;
     }
+    case 'shugg': {
+      const result = getShuggPrimaryBurstEffects(ship, spec, state, context.x, context.y, context.shipAngle, rngSeed);
+      effects.push(...result.effects);
+      damageEffects.push(...result.damageEffects);
+      rngSeed = result.rngSeed;
+      break;
+    }
     default:
       projectiles.push(spawn(nextProjectileId, ship.id, spec.primary, context.x, context.y, context.shipAngle, state, context.vx, context.vy));
       nextProjectileId += 1;
@@ -1412,7 +1638,7 @@ function firePrimary(
 
   battery -= spec.primary.cost;
   primaryCooldown = spec.primary.framesPerShot;
-  return { actors, projectiles, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
+  return { actors, projectiles, effects, damageEffects, battery, primaryCooldown, custom, rngSeed, nextProjectileId, nextActorId };
 }
 
 function fireSecondary(
@@ -1567,6 +1793,20 @@ function fireSecondary(
       custom = { ...custom, dukMissileCount: missileCount - 1 };
       break;
     }
+    case 'shugg': {
+      for (let index = 0; index < SHUGG_SECONDARY_POD_COUNT; index += 1) {
+        const spread = nextRandomInt(rngSeed, 6);
+        rngSeed = spread.seed;
+        const launchRadians = SHUGG_SECONDARY_ANGLE_START + spread.value * SHUGG_SECONDARY_ANGLE_STEP;
+        const offsetAngle = angle(context.shipAngle + radiansToAngleSteps(launchRadians));
+        const shotAngle = angle(context.shipAngle + radiansToAngleSteps(launchRadians * SHUGG_SECONDARY_FACING_SCALE));
+        const podX = fixedAdd(context.x, fixedMul(cosFixed(offsetAngle), SHUGG_SECONDARY_OFFSET));
+        const podY = fixedAdd(context.y, fixedMul(sinFixed(offsetAngle), SHUGG_SECONDARY_OFFSET));
+        projectiles.push(spawn(nextProjectileId, ship.id, spec.secondary, podX, podY, shotAngle, state, context.vx, context.vy));
+        nextProjectileId += 1;
+      }
+      break;
+    }
     case 'discfighter': {
       if (custom.discfighterDiscState === 'docked') {
         return { actors, projectiles, damageEffects, freezeEffects, battery, secondaryCooldown, x, y, custom, rngSeed, nextProjectileId, nextActorId };
@@ -1574,6 +1814,12 @@ function fireSecondary(
       damageEffects.push(...getDiscfighterShockDamageEffects(ship, context.x, context.y, custom, state, spec.secondary.damage));
       break;
     }
+    case 'bolter':
+      if (battery <= 4) {
+        return { actors, projectiles, damageEffects, freezeEffects, battery, secondaryCooldown, x, y, custom, rngSeed, nextProjectileId, nextActorId };
+      }
+      custom = { ...custom, bolterBlossomActive: true, bolterBlossomTime: 0, bolterCharge: 0, bolterChargeTime: 0 };
+      break;
   }
 
   battery -= spec.secondary.cost;
@@ -1761,6 +2007,15 @@ function resolveProjectileHit(
     };
   }
 
+  if (projectile.kind === 'shuggPod') {
+    const scrambleSteps = getShuggPodScrambleSteps(projectile);
+    return {
+      ships: ships.map((ship) => (ship.id === hit.ship.id ? shoveShuggPodTarget(ship, projectile, scrambleSteps) : ship)),
+      actors,
+      nextActorId,
+    };
+  }
+
   return {
     ships: ships.map((ship) => (ship.id === hit.ship.id ? damageShip(ship, projectile.damage) : ship)),
     actors,
@@ -1785,6 +2040,39 @@ function damageShip(ship: ShipState, rawDamage: number, piercing = false): ShipS
     crew,
     alive: crew > 0,
     custom,
+  };
+}
+
+function getShuggPodScrambleSteps(projectile: ProjectileState): number {
+  let value = (Math.imul(projectile.id + 1, 0x9e37_79b1) ^ Math.imul(projectile.ttl + 1, 0x85eb_ca6b)) >>> 0;
+  value ^= value >>> 16;
+  value = Math.imul(value, 0x7feb_352d) >>> 0;
+  value ^= value >>> 15;
+  const unit = (value >>> 0) / 0x1_0000_0000;
+  return radiansToAngleSteps((unit * 2 - 1) * SHUGG_POD_MAX_SCRAMBLE_RADIANS);
+}
+
+function shoveShuggPodTarget(ship: ShipState, projectile: ProjectileState, scrambleSteps: number): ShipState {
+  let dx = fixedSub(ship.x, projectile.x);
+  let dy = fixedSub(ship.y, projectile.y);
+  let distance = fixedSqrt(fixedAdd(fixedSquared(dx), fixedSquared(dy)));
+  if (distance === 0) {
+    dx = projectile.vx;
+    dy = projectile.vy;
+    distance = fixedSqrt(fixedAdd(fixedSquared(dx), fixedSquared(dy)));
+  }
+
+  if (distance === 0) {
+    return { ...ship, angle: angle(ship.angle + scrambleSteps) };
+  }
+
+  const shoveX = fixedMul(fixedDiv(dx, distance), SHUGG_POD_SHOVE_SPEED);
+  const shoveY = fixedMul(fixedDiv(dy, distance), SHUGG_POD_SHOVE_SPEED);
+  return {
+    ...ship,
+    vx: fixedAdd(ship.vx, shoveX),
+    vy: fixedAdd(ship.vy, shoveY),
+    angle: angle(ship.angle + scrambleSteps),
   };
 }
 
@@ -1877,6 +2165,121 @@ export function isKronBeamHitting(x: Fixed, y: Fixed, facing: Angle, enemy: Ship
     }
   }
   return false;
+}
+
+function getDoubleShipLaserHit(
+  shooter: ShipState,
+  x: Fixed,
+  y: Fixed,
+  facing: Angle,
+  laneSign: 1 | -1,
+  state: GameState,
+): { readonly target: ShipState | null; readonly pct: number } {
+  const sideX = fixedMul(fixedMul(sinFixed(facing), DOUBLESHIP_LANE_OFFSET), fixedFromInt(-laneSign));
+  const sideY = fixedMul(fixedMul(cosFixed(facing), DOUBLESHIP_LANE_OFFSET), fixedFromInt(laneSign));
+
+  for (let index = 0; index < DOUBLESHIP_SCAN_STEPS; index += 1) {
+    const distance = fixedMul(DOUBLESHIP_SCAN_SPACING, fixedFromInt(index));
+    const probeX = wrapSignedFixed(fixedAdd(fixedAdd(x, sideX), fixedMul(cosFixed(facing), distance)), state.arena.width);
+    const probeY = wrapSignedFixed(fixedAdd(fixedAdd(y, sideY), fixedMul(sinFixed(facing), distance)), state.arena.height);
+
+    for (const candidate of state.ships) {
+      if (!candidate.alive || candidate.id === shooter.id) {
+        continue;
+      }
+      const radius = getShipSpec(candidate.shipId).radius;
+      const dx = wrappedDelta(candidate.x, probeX, state.arena.width);
+      const dy = wrappedDelta(candidate.y, probeY, state.arena.height);
+      if (fixedAdd(fixedSquared(dx), fixedSquared(dy)) <= fixedSquared(radius)) {
+        return { target: candidate, pct: index / DOUBLESHIP_SCAN_STEPS };
+      }
+    }
+  }
+
+  return { target: null, pct: 1 };
+}
+
+function getDoubleShipSpecialDamageEffects(
+  shooter: ShipState,
+  x: Fixed,
+  y: Fixed,
+  state: GameState,
+  damage: number,
+): readonly DamageEffect[] {
+  const effects: DamageEffect[] = [];
+  const radiusSq = fixedSquared(DOUBLESHIP_SPECIAL_RADIUS);
+  for (const candidate of state.ships) {
+    if (!candidate.alive || candidate.id === shooter.id) {
+      continue;
+    }
+    const dx = wrappedDelta(candidate.x, x, state.arena.width);
+    const dy = wrappedDelta(candidate.y, y, state.arena.height);
+    if (fixedAdd(fixedSquared(dx), fixedSquared(dy)) <= radiusSq) {
+      effects.push({ targetId: candidate.id, sourceId: shooter.id, damage });
+    }
+  }
+  return effects;
+}
+
+function getShuggPrimaryBurstEffects(
+  shooter: ShipState,
+  spec: ShipSpec,
+  state: GameState,
+  x: Fixed,
+  y: Fixed,
+  facing: Angle,
+  rngSeed: RngSeed,
+): { readonly effects: readonly PendingEffect[]; readonly damageEffects: readonly DamageEffect[]; readonly rngSeed: RngSeed } {
+  const effects: PendingEffect[] = [];
+  const damageEffects: DamageEffect[] = [];
+  let seed = rngSeed;
+
+  for (let index = 0; index < SHUGG_PRIMARY_BURST_COUNT; index += 1) {
+    const scatterAngleRoll = nextRandom(seed);
+    seed = scatterAngleRoll.seed;
+    const scatterDistanceRoll = nextRandom(seed);
+    seed = scatterDistanceRoll.seed;
+    const forwardDistanceRoll = nextRandom(seed);
+    seed = forwardDistanceRoll.seed;
+
+    const scatterAngle = scatterAngleRoll.value * Math.PI * 2;
+    const scatterDistance = fixed(scatterDistanceRoll.value * SHUGG_PRIMARY_SCATTER_RANGE);
+    const forwardDistance = fixed(SHUGG_PRIMARY_MIN_DISTANCE + forwardDistanceRoll.value * SHUGG_PRIMARY_DISTANCE_RANGE);
+    const burstX = wrapSignedFixed(
+      fixedAdd(fixedAdd(x, fixedMul(cosFixed(facing), forwardDistance)), fixedMul(fixed(Math.cos(scatterAngle)), scatterDistance)),
+      state.arena.width,
+    );
+    const burstY = wrapSignedFixed(
+      fixedAdd(fixedAdd(y, fixedMul(sinFixed(facing), forwardDistance)), fixedMul(fixed(Math.sin(scatterAngle)), scatterDistance)),
+      state.arena.height,
+    );
+
+    effects.push({
+      kind: 'shuggBurst',
+      ownerId: shooter.id,
+      x: burstX,
+      y: burstY,
+      vx: fixedMul(cosFixed(facing), SHUGG_BURST_DRIFT_SPEED),
+      vy: fixedMul(sinFixed(facing), SHUGG_BURST_DRIFT_SPEED),
+      scale: fixed(1),
+      life: SHUGG_BURST_LIFE,
+      maxLife: SHUGG_BURST_LIFE,
+    });
+
+    const burstRadiusSq = fixedSquared(spec.primary.radius);
+    for (const candidate of state.ships) {
+      if (!candidate.alive || candidate.id === shooter.id) {
+        continue;
+      }
+      const dx = wrappedDelta(candidate.x, burstX, state.arena.width);
+      const dy = wrappedDelta(candidate.y, burstY, state.arena.height);
+      if (fixedAdd(fixedSquared(dx), fixedSquared(dy)) <= burstRadiusSq) {
+        damageEffects.push({ targetId: candidate.id, sourceId: shooter.id, damage: spec.primary.damage });
+      }
+    }
+  }
+
+  return { effects, damageEffects, rngSeed: seed };
 }
 
 function getDiscfighterShockDamageEffects(

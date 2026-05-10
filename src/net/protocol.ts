@@ -40,6 +40,10 @@ export type OwnerWeaponEffectKind =
   | 'frogChargeStart'
   | 'frogChargeUpdate'
   | 'frogChargeRelease'
+  | 'bolterChargeStart'
+  | 'bolterChargeUpdate'
+  | 'bolterChargeRelease'
+  | 'bolterBlossom'
   | 'frogShield'
   | 'kronBeam'
   | 'kronFreeze'
@@ -116,7 +120,7 @@ export interface SessionReadyPacket {}
 
 export interface SessionReadyAckPacket {}
 
-export const GAMEPLAY_PROTOCOL_VERSION = 7;
+export const GAMEPLAY_PROTOCOL_VERSION = 9;
 const HEADER_LENGTH = 2;
 const ALLOWED_SPEED_MULTIPLIERS = new Set([1, 1.5, 2]);
 const STATE_CHECKPOINT_HEADER_LENGTH = 10;
@@ -482,6 +486,10 @@ function isOwnerWeaponEffect(value: string): value is OwnerWeaponEffectKind {
     value === 'frogChargeStart' ||
     value === 'frogChargeUpdate' ||
     value === 'frogChargeRelease' ||
+    value === 'bolterChargeStart' ||
+    value === 'bolterChargeUpdate' ||
+    value === 'bolterChargeRelease' ||
+    value === 'bolterBlossom' ||
     value === 'frogShield' ||
     value === 'kronBeam' ||
     value === 'kronFreeze' ||
@@ -504,7 +512,12 @@ function isShipId(value: unknown): value is ShipId {
     value === 'kron' ||
     value === 'gooj' ||
     value === 'krab' ||
-    value === 'nurtip'
+    value === 'nurtip' ||
+    value === 'duk' ||
+    value === 'discfighter' ||
+    value === 'doubleship' ||
+    value === 'bolter' ||
+    value === 'shugg'
   );
 }
 

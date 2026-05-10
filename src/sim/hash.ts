@@ -70,6 +70,14 @@ function mixShip(hash: number, ship: ShipState): number {
   }
   next = mix(next, ship.custom.nurtipPrimaryArmed ? 1 : 0);
   next = mix(next, ship.custom.dukMissileCount ?? 0);
+  next = mix(next, Math.round((ship.custom.doubleLeftAngle ?? 0) * 10_000));
+  next = mix(next, Math.round((ship.custom.doubleRightAngle ?? 0) * 10_000));
+  next = mix(next, Math.round((ship.custom.doubleLeftPct ?? 0) * 10_000));
+  next = mix(next, Math.round((ship.custom.doubleRightPct ?? 0) * 10_000));
+  next = mix(next, ship.custom.bolterCharge ?? 0);
+  next = mix(next, ship.custom.bolterChargeTime ?? 0);
+  next = mix(next, ship.custom.bolterBlossomActive ? 1 : 0);
+  next = mix(next, ship.custom.bolterBlossomTime ?? 0);
   return next;
 }
 

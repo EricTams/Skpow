@@ -18,6 +18,14 @@ const DUK_SPECIAL_LEAD_FRAMES = 60;
 const KRON_SPECIAL_NEAR_RANGE = 400;
 const KRON_SPECIAL_AIM_DOT = 0.5;
 const KRON_SPECIAL_RECEDING_SPEED = 0.05;
+const DOUBLESHIP_SPECIAL_NEAR_RANGE = 300;
+const DOUBLESHIP_NEAR_FIRE_TOLERANCE_STEPS = FIRE_ANGLE_TOLERANCE_STEPS * 4;
+const BOLTER_AI_MIN_CHARGE_FRAMES = 25;
+const BOLTER_AI_RANGE_BUFFER = 1.1;
+const BOLTER_AI_MUZZLE_SPEED_SCALE = 0.8;
+const SHUGG_SHOT_DISTANCE = 600;
+const SHUGG_PRIMARY_MIN_EFFECTIVE_DISTANCE = 400;
+const SHUGG_SPECIAL_MAX_DISTANCE = 400;
 const AI_PURSUIT_MIN_FRAMES = 3 * 60;
 const AI_PURSUIT_FRAME_RANGE = 3 * 60;
 const AI_EVADE_MIN_FRAMES = Math.round(0.5 * 60);
@@ -53,7 +61,7 @@ export function getAiInput(state: GameState, playerId: number): number {
   const leadFrames = directAim.distance < shotDistance * CLOSE_SHOT_DISTANCE_RATIO ? closeLeadFrames : pursuitLeadFrames;
   const leadScale = getAiLeadScale(state.frame, playerId);
   const aim = getAimSolution(ship, enemy, state, leadRatio * leadFrames * leadScale);
-  const shotAim = getAimSolution(ship, enemy, state, leadRatio * closeLeadFrames * leadScale);
+  const shotAim = getAimSolution(ship, enemy, state, getShotAimLeadFrames(ship, directAim.distance, leadRatio, closeLeadFrames, leadScale));
   const cannonAngle = ship.custom.cannonAngle ?? ship.angle;
   const fireReferenceAngle = ship.shipId === 'cannonade' ? cannonAngle : ship.angle;
   const movementMode = getAiMovementMode(state, playerId);
@@ -82,14 +90,19 @@ export function getAiInput(state: GameState, playerId: number): number {
         ? shouldFrogHoldFire(ship, inFiringPosition)
         : ship.shipId === 'nurtip'
           ? shouldNurtipFire(ship, enemy, state, inFiringPosition)
-          : inFiringPosition;
+          : ship.shipId === 'bolter'
+            ? shouldBolterHoldFire(ship, shotAim, inFiringPosition)
+            : ship.shipId === 'shugg'
+              ? shouldShuggFire(shotAim, shotDelta, shotTolerance)
+              : inFiringPosition;
   // Nurtip can hold the fire bit even with depleted battery: holding is free, only launch costs.
   const isNurtipHolding = ship.shipId === 'nurtip' && Boolean(ship.custom.nurtipPrimaryArmed);
-  if (shouldFirePrimary && (canAffordPrimary || isNurtipHolding)) {
+  const isBolterHolding = ship.shipId === 'bolter' && (ship.custom.bolterCharge ?? 0) > 0;
+  if (shouldFirePrimary && (canAffordPrimary || isNurtipHolding || isBolterHolding)) {
     input |= InputBits.FirePrimary;
   }
 
-  if (shouldUseSpecial(ship, enemy, directAim.distance, state, leadScale)) {
+  if (shouldUseSpecial(ship, enemy, directAim.distance, state, leadScale, shotAim)) {
     input |= InputBits.FireSecondary;
   }
 
@@ -207,6 +220,29 @@ function shouldFrogHoldFire(ship: ShipState, inFiringPosition: boolean): boolean
     return false;
   }
   return true;
+}
+
+function shouldBolterHoldFire(ship: ShipState, shotAim: AimSolution, inFiringPosition: boolean): boolean {
+  const charge = ship.custom.bolterCharge ?? 0;
+  const chargeTime = ship.custom.bolterChargeTime ?? 0;
+  const expectedTravel = getBolterExpectedTravel(charge);
+  if (
+    inFiringPosition &&
+    charge > 0 &&
+    chargeTime >= BOLTER_AI_MIN_CHARGE_FRAMES &&
+    expectedTravel >= shotAim.distance * BOLTER_AI_RANGE_BUFFER
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function shouldShuggFire(shotAim: AimSolution, shotDelta: number, shotTolerance: number): boolean {
+  return (
+    shotAim.distance >= SHUGG_PRIMARY_MIN_EFFECTIVE_DISTANCE &&
+    shotAim.distance < SHUGG_SHOT_DISTANCE &&
+    shotDelta <= shotTolerance
+  );
 }
 
 // Nurtip primary is a remote-detonate torpedo: tap to launch, hold while it cruises, release for AOE.
@@ -334,9 +370,38 @@ function getShotDistance(ship: ShipState): number {
       return 800;
     case 'discfighter':
       return 900;
+    case 'doubleship':
+      return 340;
+    case 'bolter':
+      return getBolterExpectedTravel(ship.custom.bolterCharge ?? 0) / BOLTER_AI_RANGE_BUFFER;
+    case 'shugg':
+      return SHUGG_SHOT_DISTANCE;
     default:
       return fixedToNumber(SHOT_DISTANCE);
   }
+}
+
+function getBolterExpectedTravel(charge: number): number {
+  return (5 + 0.2 * charge) * (32 + 3 * charge);
+}
+
+function getBolterShotSpeed(charge: number): number {
+  return (5 + 0.2 * charge) * BOLTER_AI_MUZZLE_SPEED_SCALE;
+}
+
+function getShotAimLeadFrames(
+  ship: ShipState,
+  distance: number,
+  leadRatio: number,
+  closeLeadFrames: number,
+  leadScale: number,
+): number {
+  if (ship.shipId === 'bolter') {
+    const speed = getBolterShotSpeed(ship.custom.bolterCharge ?? 0);
+    return speed > 0 ? (distance / speed) * leadScale : 0;
+  }
+
+  return leadRatio * closeLeadFrames * leadScale;
 }
 
 function getShotLeadFrames(ship: ShipState): number {
@@ -359,6 +424,10 @@ function getShotLeadFrames(ship: ShipState): number {
       return 90;
     case 'discfighter':
       return 18;
+    case 'bolter':
+      return 12;
+    case 'shugg':
+      return 10;
     default:
       return SHOT_LEAD_FRAMES;
   }
@@ -368,7 +437,14 @@ function getPursuitLeadFrames(ship: ShipState): number {
   return ship.shipId === 'zizlik' ? 30 : PURSUIT_LEAD_FRAMES;
 }
 
-function shouldUseSpecial(ship: ShipState, enemy: ShipState, distance: number, state: GameState, leadScale: number): boolean {
+function shouldUseSpecial(
+  ship: ShipState,
+  enemy: ShipState,
+  distance: number,
+  state: GameState,
+  leadScale: number,
+  shotAim: AimSolution,
+): boolean {
   const spec = getShipSpec(ship.shipId);
   if (ship.secondaryCooldown > 0 || ship.battery < spec.secondary.cost) {
     return false;
@@ -384,7 +460,7 @@ function shouldUseSpecial(ship: ShipState, enemy: ShipState, distance: number, s
     case 'voskum':
       return distance < 400 && ship.crew < enemy.crew;
     case 'kron':
-      return shouldKronUseSpecial(ship, enemy, distance, state);
+      return ship.battery >= spec.secondary.cost * 2 && shouldKronUseSpecial(ship, enemy, distance, state);
     case 'gooj':
       return distance < 500;
     case 'krab': {
@@ -400,9 +476,33 @@ function shouldUseSpecial(ship: ShipState, enemy: ShipState, distance: number, s
       return shouldDukUseSpecial(ship, enemy, distance, state, leadScale);
     case 'discfighter':
       return shouldDiscfighterUseSpecial(ship, enemy, state);
+    case 'doubleship':
+      return shouldDoubleShipUseSpecial(ship, distance, shotAim);
+    case 'bolter':
+      return !ship.custom.bolterBlossomActive && ship.battery > 4 && distance < 150;
+    case 'shugg':
+      return shouldShuggUseSpecial(ship, distance, shotAim);
     default:
       return false;
   }
+}
+
+function shouldShuggUseSpecial(ship: ShipState, distance: number, shotAim: AimSolution): boolean {
+  if (distance >= SHUGG_SPECIAL_MAX_DISTANCE) {
+    return false;
+  }
+
+  return Math.abs(getSignedAngleDelta(ship.angle, shotAim.targetAngle)) <= FIRE_ANGLE_TOLERANCE_STEPS;
+}
+
+function shouldDoubleShipUseSpecial(ship: ShipState, distance: number, shotAim: AimSolution): boolean {
+  if (distance >= DOUBLESHIP_SPECIAL_NEAR_RANGE) {
+    return false;
+  }
+
+  const shotDelta = Math.abs(getSignedAngleDelta(ship.angle, shotAim.targetAngle));
+  const nearFiringSolution = shotAim.distance < getShotDistance(ship) && shotDelta <= DOUBLESHIP_NEAR_FIRE_TOLERANCE_STEPS;
+  return !nearFiringSolution;
 }
 
 function shouldDiscfighterUseSpecial(ship: ShipState, enemy: ShipState, state: GameState): boolean {

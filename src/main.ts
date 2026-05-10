@@ -41,7 +41,7 @@ const SPEED_PRESETS = [
   { id: 'high', label: 'High', multiplier: 2 },
 ] as const;
 
-const CATALOG_PREVIEW_SHIP_IDS = ['frog', 'cannonade', 'zizlik', 'voskum', 'pscout', 'kron', 'gooj', 'krab', 'nurtip', 'duk', 'discfighter'] as const satisfies readonly ShipCatalogId[];
+const CATALOG_PREVIEW_SHIP_IDS = ['frog', 'cannonade', 'zizlik', 'voskum', 'pscout', 'kron', 'gooj', 'krab', 'nurtip', 'duk', 'discfighter', 'doubleship'] as const satisfies readonly ShipCatalogId[];
 const CATALOG_DIAGRAM_SCALE_MULTIPLIER = 2.4;
 const CATALOG_LIST_SCALE_MULTIPLIER = 0.42;
 const FLEET_PICKER_ART_SCALE_MULTIPLIER = 0.50;
@@ -301,6 +301,18 @@ const SHIP_CATALOG_METADATA: Record<CatalogPreviewShipId, ShipCatalogDisplayMeta
       { index: '02', title: 'Numinus Light Frame', body: 'Classic Frog-like handling with a compact hull and thirty crew.', position: 'upper-right' },
       { index: '03', title: 'Hold-To-Thrust Control', body: 'Holding primary keeps the disc moving; releasing parks it in space.', position: 'lower-left' },
       { index: '04', title: 'Line Shock Tether', body: 'Secondary shocks targets caught near the line between ship and deployed disc.', position: 'lower-right' },
+    ],
+  },
+  doubleship: {
+    registryCode: 'SKP-LOB-012',
+    role: 'Twin-hull laser reverser',
+    primaryName: 'Dual Forward Laser',
+    secondaryName: 'Sidewinder Flip Drive',
+    callouts: [
+      { index: '01', title: 'Offset Twin Hulls', body: 'Two linked hulls ride side-by-side and rotate apart during the flip recovery.', position: 'upper-left' },
+      { index: '02', title: 'Paired Laser Lanes', body: 'Primary traces two short instant beams from the left and right hull offsets.', position: 'upper-right' },
+      { index: '03', title: 'Beam Cutoff Readout', body: 'Each beam visual shortens to the first target it intersects.', position: 'lower-left' },
+      { index: '04', title: 'Velocity Reversal Burst', body: 'Secondary flips facing and velocity while damaging nearby targets.', position: 'lower-right' },
     ],
   },
 };
@@ -1587,6 +1599,20 @@ function getUiShipLayers(shipId: ShipCatalogId, scaleMultiplier: number): readon
         { key: 'discfighterShip', scale },
         { key: 'discfighterDisc', scale, offsetX: -28 * scaleMultiplier },
       ];
+    case 'doubleship':
+      return [
+        { key: 'doubleshipShip', scale, offsetX: -15 * scaleMultiplier },
+        { key: 'doubleshipShip', scale, offsetX: 15 * scaleMultiplier },
+      ];
+    case 'bolter':
+      return [
+        { key: 'bolterBottom', scale },
+        { key: 'bolterLeftArm', scale },
+        { key: 'bolterRightArm', scale },
+        { key: 'bolterTop', scale },
+      ];
+    case 'shugg':
+      return [{ key: 'shuggShip', scale }];
   }
 }
 
@@ -1639,6 +1665,8 @@ function getCatalogPrimaryReadout(shipId: CatalogPreviewShipId): string {
       return `Fires a slightly inaccurate stunner for ${spec.primary.cost} fuel. It starts nearly inert, ramps up over time, and briefly freezes on hit.`;
     case 'discfighter':
       return `Launches one remote disc for ${spec.primary.cost} fuel. Hold primary to keep it thrusting, release to park it, then press again to dock.`;
+    case 'doubleship':
+      return `Fires two instant forward laser lanes from offset hulls. Costs ${spec.primary.cost} fuel and recycles in ${spec.primary.framesPerShot}f.`;
   }
 }
 
@@ -1669,6 +1697,8 @@ function getCatalogSecondaryReadout(shipId: CatalogPreviewShipId): string {
     }
     case 'discfighter':
       return `Costs ${spec.secondary.cost} fuel to shock targets near the tether line from ship to deployed disc. Recycles in ${spec.secondary.framesPerShot}f.`;
+    case 'doubleship':
+      return `Costs ${spec.secondary.cost} fuel to reverse velocity, flip facing, splay the hulls, and damage nearby targets in a 300u burst.`;
   }
 }
 
@@ -1880,6 +1910,34 @@ function getCatalogWeaponStats(shipId: CatalogPreviewShipId): {
             stackedBars: [
               { label: 'Disc', value: spec.primary.damage, max: 8, display: String(spec.primary.damage) },
               { label: 'Shock', value: spec.secondary.damage, max: 8, display: String(spec.secondary.damage) },
+            ],
+          },
+        ],
+      };
+    }
+    case 'doubleship': {
+      const beamRange = 32 * 10;
+      const specialRange = 300;
+      return {
+        range: {
+          label: 'Weapon Range',
+          value: Math.max(beamRange, specialRange),
+          max: 2200,
+          display: `${beamRange}u beam / ${specialRange}u burst`,
+          stackedBars: [
+            { label: 'Dual Laser', value: beamRange, max: 2200, display: `${beamRange}u` },
+            { label: 'Sidewinder Burst', value: specialRange, max: 2200, display: `${specialRange}u` },
+          ],
+        },
+        damage: [
+          {
+            label: 'Weapon Damage',
+            value: spec.primary.damage * 2,
+            max: 8,
+            display: `2 x ${spec.primary.damage} / ${spec.secondary.damage} AOE`,
+            stackedBars: [
+              { label: 'Dual Laser', value: spec.primary.damage * 2, max: 8, display: `2 x ${spec.primary.damage}` },
+              { label: 'Sidewinder Burst', value: spec.secondary.damage, max: 8, display: `${spec.secondary.damage} AOE` },
             ],
           },
         ],
@@ -4527,7 +4585,8 @@ function renderHud(loadout: MatchLoadout): void {
 function renderPilotHud(shipId: ShipCatalogId, playerIndex: 0 | 1): string {
   const ship = getShipCatalogEntry(shipId);
   const portraitClass = ship.hud.flippedPortrait && playerIndex === 0 ? ' captain-portrait-flipped' : '';
-  const shipOverlay = ship.hud.shipOverlayKey
+  const shipArt = renderHudShipArt(shipId);
+  const shipOverlay = shipId !== 'bolter' && ship.hud.shipOverlayKey
     ? `<img class="hud-ship-icon hud-ship-overlay" src="${legacyAssets[ship.hud.shipOverlayKey].url}" alt="" aria-hidden="true" />`
     : '';
 
@@ -4552,7 +4611,7 @@ function renderPilotHud(shipId: ShipCatalogId, playerIndex: 0 | 1): string {
       <div class="hud-meters">
         ${renderMeter('battery', playerIndex, ship.battery)}
         <div class="hud-ship">
-          <img class="hud-ship-icon" src="${legacyAssets[ship.hud.shipKey].url}" alt="${ship.name} ship" />
+          ${shipArt}
           ${shipOverlay}
         </div>
         ${renderMeter('crew', playerIndex, ship.crew)}
@@ -4568,6 +4627,26 @@ function renderPilotHud(shipId: ShipCatalogId, playerIndex: 0 | 1): string {
       </div>
     </section>
   `;
+}
+
+function renderHudShipArt(shipId: ShipCatalogId): string {
+  const ship = getShipCatalogEntry(shipId);
+  if (shipId !== 'bolter') {
+    return `<img class="hud-ship-icon" src="${legacyAssets[ship.hud.shipKey].url}" alt="${ship.name} ship" />`;
+  }
+
+  const layers: readonly (keyof typeof legacyAssets)[] = ['bolterBottom', 'bolterLeftArm', 'bolterRightArm', 'bolterTop'];
+  return layers
+    .map(
+      (key, index) =>
+        `<img
+          class="hud-ship-icon"
+          src="${legacyAssets[key].url}"
+          alt="${index === 0 ? `${ship.name} ship` : ''}"
+          ${index === 0 ? '' : 'aria-hidden="true"'}
+        />`,
+    )
+    .join('');
 }
 
 function renderMeter(type: 'battery' | 'crew', playerIndex: number, maxValue: number): string {
@@ -4717,8 +4796,18 @@ function trackDamage(state: GameState): void {
 }
 
 function trackAudioEvents(previousState: GameState, currentState: GameState): void {
-  trackWeaponAudioEvents(previousState, currentState);
+  if (pauseMenuOpen || hasDeadShip(previousState)) {
+    return;
+  }
+
+  if (!hasDeadShip(currentState)) {
+    trackWeaponAudioEvents(previousState, currentState);
+  }
   trackDamageAudioEvents(previousState, currentState);
+}
+
+function hasDeadShip(state: GameState): boolean {
+  return state.ships.some((ship) => !ship.alive);
 }
 
 function trackWeaponAudioEvents(previousState: GameState, currentState: GameState): void {

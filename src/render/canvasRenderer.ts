@@ -19,6 +19,9 @@ const NURTIP_MISSILE_FRAME_COUNT = 13;
 const NURTIP_ASTEROID_FRAME_COUNT = 20;
 const NURTIP_EXPLOSION_FRAME_COUNT = 8;
 const NURTIP_EXPLOSION_LIFE = 32;
+const SHUGG_EXPLOSION_FRAME_COUNT = 9;
+const SHUGG_EXPLOSION_LIFE = 27;
+const SHUGG_EXPLOSION_RENDER_SCALE = 0.52;
 const SHIP_EXPLOSION_LIFE_AT_FIRST_FRAME = 80;
 const SHIP_EXPLOSION_RENDER_SCALE = 1.0;
 const THRUST_DUST_COLOR = 'rgb(255, 144, 64)';
@@ -123,7 +126,7 @@ export class CanvasRenderer {
 
     // Explosion blooms draw above ships (legacy DrawPost).
     for (const effect of state.effects) {
-      if (effect.kind === 'shipExplosion' || effect.kind === 'nurtipExplosion') {
+      if (effect.kind === 'shipExplosion' || effect.kind === 'nurtipExplosion' || effect.kind === 'shuggBurst') {
         this.drawEffect(effect, camera);
       }
     }
@@ -307,6 +310,12 @@ export class CanvasRenderer {
       case 'discfighter':
         this.drawDiscfighterShip(ship, state, camera, x, y, angleRadians, spriteRadians);
         break;
+      case 'doubleship':
+        this.drawDoubleShip(ship, state, camera, x, y, angleRadians, spriteRadians);
+        break;
+      case 'bolter':
+        this.drawBolterShip(ship, camera, x, y, angleRadians, spriteRadians);
+        break;
       default:
         this.drawGenericShip(ship, camera, x, y, spriteRadians);
         break;
@@ -409,6 +418,66 @@ export class CanvasRenderer {
   private drawKrabShip(ship: ShipState, camera: LegacyCamera, x: number, y: number, radians: number): void {
     const spriteKey = ship.custom.krabLongRange ? 'krabShip' : 'krabShip2';
     this.drawSimpleShip(ship, camera, x, y, radians, spriteKey, 0.5);
+  }
+
+  private drawDoubleShip(
+    ship: ShipState,
+    state: GameState,
+    camera: LegacyCamera,
+    x: number,
+    y: number,
+    angleRadians: number,
+    spriteRadians: number,
+  ): void {
+    const alpha = ship.alive ? 1 : 0.35;
+    const leftAngle = ship.custom.doubleLeftAngle ?? 0;
+    const rightAngle = ship.custom.doubleRightAngle ?? 0;
+    const beamKey = (state.frame + ship.id) % 2 === 0 ? 'doubleshipBeam1' : 'doubleshipBeam2';
+    if (ship.primaryCooldown > 0 || rightAngle !== 0) {
+      this.drawDoubleShipBeam(beamKey, x, y, angleRadians, spriteRadians + rightAngle, -1, ship.custom.doubleRightPct ?? 1, camera, alpha);
+    }
+    if (ship.primaryCooldown > 0 || leftAngle !== 0) {
+      this.drawDoubleShipBeam(beamKey, x, y, angleRadians, spriteRadians + leftAngle, 1, ship.custom.doubleLeftPct ?? 1, camera, alpha);
+    }
+
+    const sideX = 15 * Math.sin(angleRadians) * camera.scale * 1.2;
+    const sideY = -15 * Math.cos(angleRadians) * camera.scale * 1.2;
+    const leftDrawn = this.drawSpriteAt('doubleshipShip', x + sideX, y + sideY, spriteRadians + leftAngle, camera.scale * 1.2, alpha);
+    const rightDrawn = this.drawSpriteAt('doubleshipShip', x - sideX, y - sideY, spriteRadians + rightAngle, camera.scale * 1.2, alpha);
+    if (!leftDrawn && !rightDrawn) {
+      this.drawFallbackAt(ship, x, y, spriteRadians, camera.scale, alpha);
+    }
+  }
+
+  private drawDoubleShipBeam(
+    key: LegacyAssetKey,
+    x: number,
+    y: number,
+    angleRadians: number,
+    spriteRadians: number,
+    side: 1 | -1,
+    pct: number,
+    camera: LegacyCamera,
+    alpha: number,
+  ): void {
+    const image = this.images.getLoaded(key);
+    if (!image) {
+      return;
+    }
+
+    const clampedPct = Math.max(0.05, Math.min(1, pct));
+    const scale = camera.scale * 1.2;
+    const width = image.naturalWidth * scale;
+    const height = image.naturalHeight * scale * clampedPct;
+    const sideX = side * 15 * Math.sin(angleRadians) * scale;
+    const sideY = side * -15 * Math.cos(angleRadians) * scale;
+    const ctx = this.context;
+    ctx.save();
+    ctx.translate(x + sideX, y + sideY);
+    ctx.rotate(spriteRadians);
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(image, -width / 2, -height * 1.05, width, height);
+    ctx.restore();
   }
 
   private drawNurtipShip(
@@ -696,6 +765,54 @@ export class CanvasRenderer {
     const alpha = ship.alive ? 1 : 0.35;
     if (!this.drawSpriteAt(spriteKey, x, y, radians, camera.scale * shipScale, alpha)) {
       this.drawFallbackAt(ship, x, y, radians, camera.scale, alpha);
+    }
+  }
+
+  private drawBolterShip(
+    ship: ShipState,
+    camera: LegacyCamera,
+    x: number,
+    y: number,
+    angleRadians: number,
+    spriteRadians: number,
+  ): void {
+    const alpha = ship.alive ? 1 : 0.35;
+    const scale = camera.scale * 0.4;
+    const chargeRatio = Math.max(0, Math.min(1, (ship.custom.bolterCharge ?? 0) / 40));
+    const forwardX = -Math.cos(angleRadians);
+    const forwardY = -Math.sin(angleRadians);
+    const sideX = Math.cos(angleRadians + Math.PI / 2);
+    const sideY = Math.sin(angleRadians + Math.PI / 2);
+    const spread = 13 * chargeRatio * camera.scale;
+    const recoil = -13 * chargeRatio * chargeRatio * camera.scale;
+
+    let drawn = this.drawSpriteAt('bolterBottom', x, y, spriteRadians, scale, alpha);
+    drawn =
+      this.drawSpriteAt(
+        'bolterLeftArm',
+        x - sideX * spread - forwardX * recoil,
+        y - sideY * spread - forwardY * recoil,
+        spriteRadians - chargeRatio,
+        scale,
+        alpha,
+      ) || drawn;
+    drawn =
+      this.drawSpriteAt(
+        'bolterRightArm',
+        x + sideX * spread - forwardX * recoil,
+        y + sideY * spread - forwardY * recoil,
+        spriteRadians + chargeRatio,
+        scale,
+        alpha,
+      ) || drawn;
+
+    if (chargeRatio > 0 && ship.primaryCooldown === 0) {
+      drawn = this.drawSpriteAt('bolterShot', x - forwardX * spread, y - forwardY * spread, spriteRadians, scale, alpha) || drawn;
+    }
+
+    drawn = this.drawSpriteAt('bolterTop', x, y, spriteRadians, scale, alpha) || drawn;
+    if (!drawn) {
+      this.drawFallbackAt(ship, x, y, spriteRadians, camera.scale, alpha);
     }
   }
 
@@ -1032,6 +1149,14 @@ export class CanvasRenderer {
       return 'discfighterDisc';
     }
 
+    if (projectile.kind === 'bolterShot' || projectile.kind === 'bolterSmallShot') {
+      return 'bolterShot';
+    }
+
+    if (projectile.kind === 'shuggPod') {
+      return 'shuggShot';
+    }
+
     return fallback;
   }
 
@@ -1059,6 +1184,18 @@ export class CanvasRenderer {
 
     if (projectile.kind === 'discfighterDisc') {
       return 0.2;
+    }
+
+    if (projectile.kind === 'bolterShot') {
+      return 0.4;
+    }
+
+    if (projectile.kind === 'bolterSmallShot') {
+      return 0.16;
+    }
+
+    if (projectile.kind === 'shuggPod') {
+      return 1.0;
     }
 
     return fallback;
@@ -1121,6 +1258,11 @@ export class CanvasRenderer {
 
     if (effect.kind === 'nurtipExplosion') {
       this.drawNurtipExplosion(effect, camera);
+      return;
+    }
+
+    if (effect.kind === 'shuggBurst') {
+      this.drawShuggBurst(effect, camera);
       return;
     }
 
@@ -1201,6 +1343,52 @@ export class CanvasRenderer {
     const drawHeight = cellHeight * drawScale;
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
+    ctx.drawImage(
+      image,
+      frameIndex * cellWidth,
+      0,
+      cellWidth,
+      cellHeight,
+      x - drawWidth / 2,
+      y - drawHeight / 2,
+      drawWidth,
+      drawHeight,
+    );
+    ctx.restore();
+  }
+
+  private drawShuggBurst(effect: EffectState, camera: LegacyCamera): void {
+    const ctx = this.context;
+    const x = this.toScreenX(fixedToNumber(effect.x), camera);
+    const y = this.toScreenY(fixedToNumber(effect.y), camera);
+    const image = this.images.getLoaded('shuggExplosion');
+    const frameIndex = Math.min(
+      SHUGG_EXPLOSION_FRAME_COUNT - 1,
+      Math.max(0, Math.floor(((SHUGG_EXPLOSION_LIFE - effect.life) * SHUGG_EXPLOSION_FRAME_COUNT) / SHUGG_EXPLOSION_LIFE)),
+    );
+
+    if (!image) {
+      const alpha = Math.max(0, effect.life / SHUGG_EXPLOSION_LIFE);
+      const radius = 45 * camera.scale * (1 + frameIndex / SHUGG_EXPLOSION_FRAME_COUNT);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = alpha * 0.65;
+      ctx.fillStyle = '#8ecbff';
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      return;
+    }
+
+    const cellWidth = image.naturalWidth / SHUGG_EXPLOSION_FRAME_COUNT;
+    const cellHeight = image.naturalHeight;
+    const drawScale = camera.scale * SHUGG_EXPLOSION_RENDER_SCALE;
+    const drawWidth = cellWidth * drawScale;
+    const drawHeight = cellHeight * drawScale;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.7;
     ctx.drawImage(
       image,
       frameIndex * cellWidth,

@@ -841,6 +841,9 @@ export class NetworkMatchSession {
     if (isFrogChargeRelease(previousShip, ship, localProjectileSpawned)) {
       this.queueWeaponEvent(previousShip, ship, nextState, 'primary', 'frogChargeRelease');
     }
+    if (isBolterChargeRelease(previousShip, ship, localProjectileSpawned)) {
+      this.queueWeaponEvent(previousShip, ship, nextState, 'primary', 'bolterChargeRelease');
+    }
     if (isNurtipDetonate(previousShip, ship)) {
       this.queueNurtipDetonateEvent(previousShip, ship, previousState, nextState);
     }
@@ -942,17 +945,18 @@ function readError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-// Some primary weapons (currently only the Nurtip torpedo) hold the FirePrimary bit
+// Some primary weapons hold the FirePrimary bit
 // across many frames on the owner's machine, gated by ship.custom flags. Without
 // FirePrimary in the remote-replay input, the owner-replayed branch in stepShip would
-// see "armed && !FirePrimary" and trigger spuriously every frame on the receiver. We
-// reconstruct the missing bit from the synced ship state so firePrimary's armed-guard
-// short-circuits and the release branch never fires on the receiver. Actual detonation
-// is delivered via the OwnerWeaponEvent packet (see queueWeaponEvents).
+// see a release state and trigger spuriously on the receiver. We reconstruct the
+// missing bit from synced ship state; actual releases arrive via weapon/projectile packets.
 function computeRemoteInput(state: GameState, localPlayerIndex: PlayerIndex, remoteThrusting: boolean): number {
   let input = remoteThrusting ? InputBits.Thrust : 0;
   const remoteShip = state.ships[localPlayerIndex === 0 ? 1 : 0];
   if (remoteShip?.shipId === 'nurtip' && remoteShip.alive && Boolean(remoteShip.custom.nurtipPrimaryArmed)) {
+    input |= InputBits.FirePrimary;
+  }
+  if (remoteShip?.shipId === 'bolter' && remoteShip.alive && (remoteShip.custom.bolterCharge ?? 0) > 0) {
     input |= InputBits.FirePrimary;
   }
   return input;
@@ -1007,6 +1011,9 @@ function getWeaponEffectKind(
     if (ship.shipId === 'frog' && (ship.custom.frogCharge ?? 0) !== (previousShip.custom.frogCharge ?? 0)) {
       return (previousShip.custom.frogCharge ?? 0) <= 0 ? 'frogChargeStart' : 'frogChargeUpdate';
     }
+    if (ship.shipId === 'bolter' && (ship.custom.bolterCharge ?? 0) !== (previousShip.custom.bolterCharge ?? 0)) {
+      return (previousShip.custom.bolterCharge ?? 0) <= 0 ? 'bolterChargeStart' : 'bolterChargeUpdate';
+    }
     return null;
   }
 
@@ -1023,6 +1030,8 @@ function getWeaponEffectKind(
       return 'zizlikNode';
     case 'pscout':
       return 'pscoutBeam';
+    case 'bolter':
+      return ship.custom.bolterBlossomActive && !previousShip.custom.bolterBlossomActive ? 'bolterBlossom' : null;
     default:
       return 'generic';
   }
@@ -1035,6 +1044,11 @@ function getWeaponEventDuration(ship: GameState['ships'][number], effectKind: Ow
     case 'kronBeam':
       return ship.primaryCooldown;
     case 'kronFreeze':
+      return ship.secondaryCooldown;
+    case 'bolterChargeStart':
+    case 'bolterChargeUpdate':
+      return ship.custom.bolterChargeTime;
+    case 'bolterBlossom':
       return ship.secondaryCooldown;
     default:
       return undefined;
@@ -1052,6 +1066,11 @@ function getWeaponEventStrength(
       return ship.custom.frogCharge;
     case 'frogChargeRelease':
       return previousShip.custom.frogCharge;
+    case 'bolterChargeStart':
+    case 'bolterChargeUpdate':
+      return ship.custom.bolterCharge;
+    case 'bolterChargeRelease':
+      return previousShip.custom.bolterCharge;
     case 'pscoutBeam':
       return ship.custom.pscoutBeamStrength;
     default:
@@ -1065,6 +1084,14 @@ function isFrogChargeRelease(
   localProjectileSpawned: boolean,
 ): boolean {
   return ship.shipId === 'frog' && localProjectileSpawned && (previousShip.custom.frogCharge ?? 0) > 0 && (ship.custom.frogCharge ?? 0) === 0;
+}
+
+function isBolterChargeRelease(
+  previousShip: GameState['ships'][number],
+  ship: GameState['ships'][number],
+  localProjectileSpawned: boolean,
+): boolean {
+  return ship.shipId === 'bolter' && localProjectileSpawned && (previousShip.custom.bolterCharge ?? 0) > 0 && (ship.custom.bolterCharge ?? 0) === 0;
 }
 
 function isNurtipDetonate(

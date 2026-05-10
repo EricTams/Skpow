@@ -1,8 +1,12 @@
 import type { ShipId } from './sim/shipSpecs';
 
 import skpow160Url from '../music/Skpow160.ogg?url';
+import bolterFireUrl from '../sfx/bolter_WF2.ogg?url';
+import bolterSpecialUrl from '../sfx/bolter_SWalt.ogg?url';
 import cannonadeSpecialUrl from '../sfx/cannonade_SW.ogg?url';
 import cannonadeFireUrl from '../sfx/cannonade_WF.ogg?url';
+import doubleshipSpecialUrl from '../sfx/double_SW.ogg?url';
+import doubleshipFireUrl from '../sfx/double_WF.ogg?url';
 import frogshipSpecialUrl from '../sfx/frogship_SW.ogg?url';
 import frogshipFireUrl from '../sfx/frogship_WF.ogg?url';
 import goojSpecialUrl from '../sfx/Gooj_SW.ogg?url';
@@ -33,6 +37,8 @@ export const audioAssets = {
   sfx: {
     SOUND_DIE: skpowUrl,
     SOUND_HIT: weaponHitUrl,
+    SOUND_BOLTER_FIRE: bolterFireUrl,
+    SOUND_BOLTER_SPECIAL: bolterSpecialUrl,
     SOUND_FROGSHIP_FIRE: frogshipFireUrl,
     SOUND_FROGSHIP_SPECIAL: frogshipSpecialUrl,
     SOUND_CANNONADE_FIRE: cannonadeFireUrl,
@@ -55,6 +61,8 @@ export const audioAssets = {
     SOUND_MISSILESHIP_SPECIAL: missileshipSpecialUrl,
     SOUND_DISCFIGHTER_FIRE: numinusFireUrl,
     SOUND_DISCFIGHTER_SPECIAL: numinusSpecialUrl,
+    SOUND_DOUBLESHIP_FIRE: doubleshipFireUrl,
+    SOUND_DOUBLESHIP_SPECIAL: doubleshipSpecialUrl,
   },
 } as const;
 
@@ -104,5 +112,17 @@ export const shipSfx: Record<ShipId, { readonly primary: SfxId; readonly seconda
   discfighter: {
     primary: 'SOUND_DISCFIGHTER_FIRE',
     secondary: 'SOUND_DISCFIGHTER_SPECIAL',
+  },
+  doubleship: {
+    primary: 'SOUND_DOUBLESHIP_FIRE',
+    secondary: 'SOUND_DOUBLESHIP_SPECIAL',
+  },
+  bolter: {
+    primary: 'SOUND_BOLTER_FIRE',
+    secondary: 'SOUND_BOLTER_SPECIAL',
+  },
+  shugg: {
+    primary: 'SOUND_MISSILESHIP_SPECIAL',
+    secondary: 'SOUND_MISSILESHIP_FIRE',
   },
 };

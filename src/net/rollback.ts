@@ -152,6 +152,36 @@ export class OwnerAuthoritySession {
           frogChargeTime: 0,
         },
       };
+    } else if (packet.effectKind === 'bolterChargeStart' || packet.effectKind === 'bolterChargeUpdate') {
+      nextShip = {
+        ...baseShip,
+        custom: {
+          ...baseShip.custom,
+          bolterCharge: packet.strength ?? baseShip.custom.bolterCharge ?? 1,
+          bolterChargeTime: packet.durationFrames ?? baseShip.custom.bolterChargeTime ?? 0,
+        },
+      };
+    } else if (packet.effectKind === 'bolterChargeRelease') {
+      nextShip = {
+        ...baseShip,
+        custom: {
+          ...baseShip.custom,
+          bolterCharge: 0,
+          bolterChargeTime: 0,
+        },
+      };
+    } else if (packet.effectKind === 'bolterBlossom') {
+      nextShip = {
+        ...baseShip,
+        secondaryCooldown: Math.max(baseShip.secondaryCooldown, packet.durationFrames ?? 200),
+        custom: {
+          ...baseShip.custom,
+          bolterBlossomActive: true,
+          bolterBlossomTime: 0,
+          bolterCharge: 0,
+          bolterChargeTime: 0,
+        },
+      };
     } else if (packet.effectKind === 'kronBeam') {
       nextShip = {
         ...baseShip,

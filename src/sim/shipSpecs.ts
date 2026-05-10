@@ -11,7 +11,10 @@ export type ShipId =
   | 'krab'
   | 'nurtip'
   | 'duk'
-  | 'discfighter';
+  | 'discfighter'
+  | 'doubleship'
+  | 'bolter'
+  | 'shugg';
 
 export type ProjectileKind =
   | 'generic'
@@ -30,7 +33,10 @@ export type ProjectileKind =
   | 'nurtipAsteroid'
   | 'dukStunner'
   | 'dukMissile'
-  | 'discfighterDisc';
+  | 'discfighterDisc'
+  | 'bolterShot'
+  | 'bolterSmallShot'
+  | 'shuggPod';
 
 export interface WeaponSpec {
   readonly speed: Fixed;
@@ -361,6 +367,97 @@ export const SHIP_SPECS: Record<ShipId, ShipSpec> = {
       damage: 2,
       radius: fixedFromInt(60),
       kind: 'generic',
+    },
+  },
+  doubleship: {
+    id: 'doubleship',
+    crew: 20,
+    battery: 20,
+    batteryChargeFrames: 40,
+    turnStep: legacyTurnStep(0.010),
+    maxSpeed: legacyMaxSpeed(2.8),
+    accel: legacyAccel(0.017),
+    brake: fixed(0.99),
+    radius: legacyHitRadius(30, 1.2),
+    renderScale: 1.2,
+    primary: {
+      speed: fixed(0),
+      framesPerShot: 20,
+      cost: 2,
+      ttl: 1,
+      damage: 1,
+      radius: fixedFromInt(0),
+      kind: 'generic',
+    },
+    secondary: {
+      speed: fixed(0),
+      framesPerShot: 80,
+      cost: 2,
+      ttl: 1,
+      damage: 1,
+      radius: fixedFromInt(300),
+      kind: 'generic',
+    },
+  },
+  bolter: {
+    id: 'bolter',
+    crew: 30,
+    battery: 30,
+    batteryChargeFrames: 75,
+    turnStep: legacyTurnStep(0.012),
+    maxSpeed: legacyMaxSpeed(1.39),
+    accel: legacyAccel(0.018),
+    brake: fixed(0.98),
+    radius: legacyHitRadius(55, 0.4),
+    renderScale: 0.4,
+    primary: {
+      speed: fixed(5),
+      framesPerShot: 40,
+      cost: 4,
+      ttl: 32,
+      damage: 4,
+      radius: fixedFromInt(16),
+      kind: 'bolterShot',
+    },
+    secondary: {
+      speed: fixed(8.5),
+      framesPerShot: 200,
+      cost: 0,
+      ttl: 80,
+      damage: 1,
+      radius: fixedFromInt(8),
+      kind: 'bolterSmallShot',
+    },
+  },
+  shugg: {
+    id: 'shugg',
+    crew: 24,
+    battery: 24,
+    batteryChargeFrames: 40,
+    turnStep: legacyTurnStep(0.009),
+    maxSpeed: legacyMaxSpeed(1.39),
+    accel: legacyAccel(0.018),
+    brake: fixed(0.99),
+    radius: legacyHitRadius(75, 0.6),
+    renderScale: 0.6,
+    primary: {
+      speed: fixed(0),
+      framesPerShot: 15,
+      cost: 1,
+      ttl: 1,
+      damage: 1,
+      radius: fixedFromInt(87),
+      kind: 'generic',
+    },
+    secondary: {
+      speed: fixed(9),
+      framesPerShot: 10,
+      cost: 1,
+      // Scaled by PROJECTILE_TTL_SCALE in the sim, yielding the legacy 80-frame pod life at 1x speed.
+      ttl: 64,
+      damage: 0,
+      radius: fixedFromInt(20),
+      kind: 'shuggPod',
     },
   },
   krab: {

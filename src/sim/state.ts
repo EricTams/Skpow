@@ -101,6 +101,10 @@ function createCustomState(shipId: ShipId, facing: ShipState['angle']): ShipCust
       return { dukMissileCount: 4 };
     case 'discfighter':
       return { discfighterDiscState: 'docked', discfighterDiscUpdateMissed: 0 };
+    case 'doubleship':
+      return { doubleLeftAngle: 0, doubleRightAngle: 0, doubleLeftPct: 1, doubleRightPct: 1 };
+    case 'bolter':
+      return { bolterCharge: 0, bolterChargeTime: 0, bolterBlossomActive: false, bolterBlossomTime: 0 };
     default:
       return {};
   }
@@ -119,6 +123,20 @@ function sanitizeRoundStartCustom(shipId: ShipId, facing: ShipState['angle'], cu
       return { pscoutBeamFrames: 0, pscoutBeamStrength: 0 };
     case 'discfighter':
       return { discfighterDiscState: 'docked', discfighterDiscUpdateMissed: 0 };
+    case 'doubleship':
+      return {
+        doubleLeftAngle: custom?.doubleLeftAngle ?? base.doubleLeftAngle,
+        doubleRightAngle: custom?.doubleRightAngle ?? base.doubleRightAngle,
+        doubleLeftPct: custom?.doubleLeftPct ?? base.doubleLeftPct,
+        doubleRightPct: custom?.doubleRightPct ?? base.doubleRightPct,
+      };
+    case 'bolter':
+      return {
+        bolterCharge: custom?.bolterCharge ?? base.bolterCharge,
+        bolterChargeTime: custom?.bolterChargeTime ?? base.bolterChargeTime,
+        bolterBlossomActive: custom?.bolterBlossomActive ?? base.bolterBlossomActive,
+        bolterBlossomTime: custom?.bolterBlossomTime ?? base.bolterBlossomTime,
+      };
     default:
       return base;
   }

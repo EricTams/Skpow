@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-05-09T19:54:13.620Z",
+  "generatedAt": "2026-05-10T16:21:02.990Z",
   "root": "art",
-  "fileCount": 89,
+  "fileCount": 108,
   "files": [
     {
       "name": "admiral.jpg",
@@ -57,6 +57,62 @@
       "ext": ".png",
       "relativePath": "art/beam2.png",
       "sizeBytes": 43893,
+      "kind": "image"
+    },
+    {
+      "name": "bolter_bottom.png",
+      "ext": ".png",
+      "relativePath": "art/bolter_bottom.png",
+      "sizeBytes": 7760,
+      "kind": "image"
+    },
+    {
+      "name": "bolter_left_arm.png",
+      "ext": ".png",
+      "relativePath": "art/bolter_left_arm.png",
+      "sizeBytes": 6780,
+      "kind": "image"
+    },
+    {
+      "name": "bolter_right_arm.png",
+      "ext": ".png",
+      "relativePath": "art/bolter_right_arm.png",
+      "sizeBytes": 6915,
+      "kind": "image"
+    },
+    {
+      "name": "bolter_top.png",
+      "ext": ".png",
+      "relativePath": "art/bolter_top.png",
+      "sizeBytes": 14978,
+      "kind": "image"
+    },
+    {
+      "name": "Bolter.png",
+      "ext": ".png",
+      "relativePath": "art/Bolter.png",
+      "sizeBytes": 5711,
+      "kind": "image"
+    },
+    {
+      "name": "BolterOverlay.png",
+      "ext": ".png",
+      "relativePath": "art/BolterOverlay.png",
+      "sizeBytes": 7304,
+      "kind": "image"
+    },
+    {
+      "name": "bolterpilotj.jpg",
+      "ext": ".jpg",
+      "relativePath": "art/bolterpilotj.jpg",
+      "sizeBytes": 44271,
+      "kind": "image"
+    },
+    {
+      "name": "BolterShot.png",
+      "ext": ".png",
+      "relativePath": "art/BolterShot.png",
+      "sizeBytes": 1174,
       "kind": "image"
     },
     {
@@ -141,6 +197,27 @@
       "ext": ".png",
       "relativePath": "art/discfighter.png",
       "sizeBytes": 81721,
+      "kind": "image"
+    },
+    {
+      "name": "doubleship.png",
+      "ext": ".png",
+      "relativePath": "art/doubleship.png",
+      "sizeBytes": 5493,
+      "kind": "image"
+    },
+    {
+      "name": "duallaser.png",
+      "ext": ".png",
+      "relativePath": "art/duallaser.png",
+      "sizeBytes": 4735,
+      "kind": "image"
+    },
+    {
+      "name": "duallaser2.png",
+      "ext": ".png",
+      "relativePath": "art/duallaser2.png",
+      "sizeBytes": 4646,
       "kind": "image"
     },
     {
@@ -305,10 +382,31 @@
       "kind": "image"
     },
     {
+      "name": "loobeename.png",
+      "ext": ".png",
+      "relativePath": "art/loobeename.png",
+      "sizeBytes": 3612,
+      "kind": "image"
+    },
+    {
       "name": "mainscreen.jpg",
       "ext": ".jpg",
       "relativePath": "art/mainscreen.jpg",
       "sizeBytes": 673766,
+      "kind": "image"
+    },
+    {
+      "name": "metaphytename.png",
+      "ext": ".png",
+      "relativePath": "art/metaphytename.png",
+      "sizeBytes": 3843,
+      "kind": "image"
+    },
+    {
+      "name": "misc_portrait.jpg",
+      "ext": ".jpg",
+      "relativePath": "art/misc_portrait.jpg",
+      "sizeBytes": 6712,
       "kind": "image"
     },
     {
@@ -473,6 +571,34 @@
       "kind": "image"
     },
     {
+      "name": "Shugg.png",
+      "ext": ".png",
+      "relativePath": "art/Shugg.png",
+      "sizeBytes": 41613,
+      "kind": "image"
+    },
+    {
+      "name": "shuggname.png",
+      "ext": ".png",
+      "relativePath": "art/shuggname.png",
+      "sizeBytes": 3742,
+      "kind": "image"
+    },
+    {
+      "name": "shuggp.jpg",
+      "ext": ".jpg",
+      "relativePath": "art/shuggp.jpg",
+      "sizeBytes": 36425,
+      "kind": "image"
+    },
+    {
+      "name": "shuggshot.png",
+      "ext": ".png",
+      "relativePath": "art/shuggshot.png",
+      "sizeBytes": 6475,
+      "kind": "image"
+    },
+    {
       "name": "soweito_portrait.jpg",
       "ext": ".jpg",
       "relativePath": "art/soweito_portrait.jpg",
@@ -526,6 +652,13 @@
       "ext": ".png",
       "relativePath": "art/splosionframes2.png",
       "sizeBytes": 719396,
+      "kind": "image"
+    },
+    {
+      "name": "splosionframesblue.png",
+      "ext": ".png",
+      "relativePath": "art/splosionframesblue.png",
+      "sizeBytes": 142176,
       "kind": "image"
     },
     {

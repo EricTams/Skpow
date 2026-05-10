@@ -264,6 +264,17 @@ describe('reference-style AI input', () => {
     expect(input & InputBits.FireSecondary).toBe(InputBits.FireSecondary);
   });
 
+  it('holds Kron secondary until it has twice the special cost in battery', () => {
+    const state = withShips(createInitialState(123, ['frog', 'kron']), [
+      { id: 0, x: fixedFromInt(300), y: fixedFromInt(0), angle: angle(128), vx: fixed(0), vy: fixed(0) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), vx: fixed(1), vy: fixed(0), battery: 15 },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FireSecondary).toBe(0);
+  });
+
   it('holds Kron secondary when out of range and drifting away from the target', () => {
     const state = withShips(createInitialState(123, ['frog', 'kron']), [
       { id: 0, x: fixedFromInt(700), y: fixedFromInt(0), angle: angle(128), vx: fixed(0), vy: fixed(0) },
@@ -295,6 +306,52 @@ describe('reference-style AI input', () => {
     const input = getAiInput(state, 1);
 
     expect(input & InputBits.FireSecondary).toBe(0);
+  });
+
+  it('holds DoubleShip secondary when close and near a firing solution', () => {
+    const state = withShips(createInitialState(123, ['frog', 'doubleship']), [
+      { id: 0, x: fixedFromInt(250), y: fixedFromInt(0), angle: angle(128), vx: fixed(0), vy: fixed(0) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), battery: 20 },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FirePrimary).toBe(InputBits.FirePrimary);
+    expect(input & InputBits.FireSecondary).toBe(0);
+  });
+
+  it('holds DoubleShip secondary when close and almost near a firing solution', () => {
+    const state = withShips(createInitialState(123, ['frog', 'doubleship']), [
+      { id: 0, x: fixedFromInt(250), y: fixedFromInt(0), angle: angle(128), vx: fixed(0), vy: fixed(0) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(16), battery: 20 },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FireSecondary).toBe(0);
+  });
+
+  it('holds DoubleShip secondary near a firing solution while primary is cooling down', () => {
+    const state = withShips(createInitialState(123, ['frog', 'doubleship']), [
+      { id: 0, x: fixedFromInt(250), y: fixedFromInt(0), angle: angle(128), vx: fixed(0), vy: fixed(0) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), battery: 18, primaryCooldown: 12 },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FireSecondary).toBe(0);
+  });
+
+  it('fires DoubleShip secondary when close and off its firing solution', () => {
+    const state = withShips(createInitialState(123, ['frog', 'doubleship']), [
+      { id: 0, x: fixedFromInt(250), y: fixedFromInt(0), angle: angle(128), vx: fixed(0), vy: fixed(0) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(64), battery: 20 },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FirePrimary).toBe(0);
+    expect(input & InputBits.FireSecondary).toBe(InputBits.FireSecondary);
   });
 
   it('fires Duk secondary when aimed with missiles in the rack', () => {
@@ -405,6 +462,94 @@ describe('reference-style AI input', () => {
     const input = getAiInput(state, 1);
 
     expect(input & InputBits.FirePrimary).toBe(InputBits.FirePrimary);
+  });
+
+  it('does not release the Bolter primary before its minimum charge time', () => {
+    const charging = withShips(createInitialState(123, ['cannonade', 'bolter']), [
+      { id: 0, x: fixedFromInt(250), y: fixedFromInt(0), angle: angle(128) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), custom: { bolterCharge: 0 } },
+    ]);
+    const barelyCharged = withShips(charging, [{ id: 1, custom: { bolterCharge: 1, bolterChargeTime: 5 } }]);
+
+    expect(getAiInput(charging, 1) & InputBits.FirePrimary).toBe(InputBits.FirePrimary);
+    expect(getAiInput(barelyCharged, 1) & InputBits.FirePrimary).toBe(InputBits.FirePrimary);
+  });
+
+  it('keeps charging Bolter until the bolt has enough range for the target', () => {
+    const weakLongShot = withShips(createInitialState(123, ['cannonade', 'bolter']), [
+      { id: 0, x: fixedFromInt(450), y: fixedFromInt(0), angle: angle(128) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), custom: { bolterCharge: 6, bolterChargeTime: 30 } },
+    ]);
+    const readyLongShot = withShips(weakLongShot, [{ id: 1, custom: { bolterCharge: 12, bolterChargeTime: 60 } }]);
+
+    expect(getAiInput(weakLongShot, 1) & InputBits.FirePrimary).toBe(InputBits.FirePrimary);
+    expect(getAiInput(readyLongShot, 1) & InputBits.FirePrimary).toBe(0);
+  });
+
+  it('leads moving targets with charged Bolter shots before releasing', () => {
+    const state = withShips(createInitialState(123, ['cannonade', 'bolter']), [
+      { id: 0, x: fixedFromInt(450), y: fixedFromInt(0), vy: fixed(2), angle: angle(128) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), custom: { bolterCharge: 12, bolterChargeTime: 60 } },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FirePrimary).toBe(InputBits.FirePrimary);
+  });
+
+  it('uses Bolter blossom at close range', () => {
+    const state = withShips(createInitialState(123, ['frog', 'bolter']), [
+      { id: 0, x: fixedFromInt(120), y: fixedFromInt(0), angle: angle(128) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), battery: 30 },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FireSecondary).toBe(InputBits.FireSecondary);
+  });
+
+  it('fires Shugg primary at medium range when aligned', () => {
+    const state = withShips(createInitialState(123, ['frog', 'shugg']), [
+      { id: 0, x: fixedFromInt(550), y: fixedFromInt(0), angle: angle(128) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), battery: 24 },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FirePrimary).toBe(InputBits.FirePrimary);
+  });
+
+  it('does not fire Shugg primary inside its burst arming distance', () => {
+    const state = withShips(createInitialState(123, ['frog', 'shugg']), [
+      { id: 0, x: fixedFromInt(300), y: fixedFromInt(0), angle: angle(128) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), battery: 24 },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FirePrimary).toBe(0);
+  });
+
+  it('uses Shugg special when the enemy is close in front', () => {
+    const state = withShips(createInitialState(123, ['frog', 'shugg']), [
+      { id: 0, x: fixedFromInt(300), y: fixedFromInt(0), angle: angle(128) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), battery: 24 },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FireSecondary).toBe(InputBits.FireSecondary);
+  });
+
+  it('holds Shugg special when the enemy is close behind', () => {
+    const state = withShips(createInitialState(123, ['frog', 'shugg']), [
+      { id: 0, x: fixedFromInt(-300), y: fixedFromInt(0), angle: angle(128) },
+      { id: 1, x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), battery: 24 },
+    ]);
+
+    const input = getAiInput(state, 1);
+
+    expect(input & InputBits.FireSecondary).toBe(0);
   });
 
   it('holds Kron secondary when the enemy is already frozen', () => {

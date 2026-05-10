@@ -159,6 +159,58 @@ export const legacyAssets = {
     relativePath: 'art/disc.png',
     url: new URL('../../art/disc.png', import.meta.url).href,
   },
+  doubleshipShip: {
+    relativePath: 'art/doubleship.png',
+    url: new URL('../../art/doubleship.png', import.meta.url).href,
+  },
+  doubleshipBeam1: {
+    relativePath: 'art/duallaser.png',
+    url: new URL('../../art/duallaser.png', import.meta.url).href,
+  },
+  doubleshipBeam2: {
+    relativePath: 'art/duallaser2.png',
+    url: new URL('../../art/duallaser2.png', import.meta.url).href,
+  },
+  bolterShip: {
+    relativePath: 'art/Bolter.png',
+    url: new URL('../../art/Bolter.png', import.meta.url).href,
+  },
+  bolterOverlay: {
+    relativePath: 'art/BolterOverlay.png',
+    url: new URL('../../art/BolterOverlay.png', import.meta.url).href,
+  },
+  bolterBottom: {
+    relativePath: 'art/bolter_bottom.png',
+    url: new URL('../../art/bolter_bottom.png', import.meta.url).href,
+  },
+  bolterTop: {
+    relativePath: 'art/bolter_top.png',
+    url: new URL('../../art/bolter_top.png', import.meta.url).href,
+  },
+  bolterLeftArm: {
+    relativePath: 'art/bolter_left_arm.png',
+    url: new URL('../../art/bolter_left_arm.png', import.meta.url).href,
+  },
+  bolterRightArm: {
+    relativePath: 'art/bolter_right_arm.png',
+    url: new URL('../../art/bolter_right_arm.png', import.meta.url).href,
+  },
+  bolterShot: {
+    relativePath: 'art/BolterShot.png',
+    url: new URL('../../art/BolterShot.png', import.meta.url).href,
+  },
+  shuggShip: {
+    relativePath: 'art/Shugg.png',
+    url: new URL('../../art/Shugg.png', import.meta.url).href,
+  },
+  shuggShot: {
+    relativePath: 'art/shuggshot.png',
+    url: new URL('../../art/shuggshot.png', import.meta.url).href,
+  },
+  shuggExplosion: {
+    relativePath: 'art/splosionframesblue.png',
+    url: new URL('../../art/splosionframesblue.png', import.meta.url).href,
+  },
   mainScreen: {
     relativePath: 'art/mainscreen.jpg',
     url: new URL('../../art/mainscreen.jpg', import.meta.url).href,
@@ -246,6 +298,18 @@ export const legacyAssets = {
   discfighterName: {
     relativePath: 'art/numinusname.png',
     url: new URL('../../art/numinusname.png', import.meta.url).href,
+  },
+  doubleshipName: {
+    relativePath: 'art/loobeename.png',
+    url: new URL('../../art/loobeename.png', import.meta.url).href,
+  },
+  bolterName: {
+    relativePath: 'art/metaphytename.png',
+    url: new URL('../../art/metaphytename.png', import.meta.url).href,
+  },
+  shuggName: {
+    relativePath: 'art/shuggname.png',
+    url: new URL('../../art/shuggname.png', import.meta.url).href,
   },
   planet: {
     relativePath: 'art/planets.png',
@@ -342,6 +406,18 @@ export const legacyAssets = {
   discfighterPortrait: {
     relativePath: 'art/numinusportrait.jpg',
     url: new URL('../../art/numinusportrait.jpg', import.meta.url).href,
+  },
+  doubleshipPortrait: {
+    relativePath: 'art/misc_portrait.jpg',
+    url: new URL('../../art/misc_portrait.jpg', import.meta.url).href,
+  },
+  bolterPortrait: {
+    relativePath: 'art/bolterpilotj.jpg',
+    url: new URL('../../art/bolterpilotj.jpg', import.meta.url).href,
+  },
+  shuggPortrait: {
+    relativePath: 'art/shuggp.jpg',
+    url: new URL('../../art/shuggp.jpg', import.meta.url).href,
   },
   frogShot: {
     relativePath: 'art/frogshot.png',

@@ -56,6 +56,14 @@ export interface ShipCustomState {
   readonly discfighterDiscX?: Fixed;
   readonly discfighterDiscY?: Fixed;
   readonly discfighterDiscUpdateMissed?: number;
+  readonly doubleLeftAngle?: number;
+  readonly doubleRightAngle?: number;
+  readonly doubleLeftPct?: number;
+  readonly doubleRightPct?: number;
+  readonly bolterCharge?: number;
+  readonly bolterChargeTime?: number;
+  readonly bolterBlossomActive?: boolean;
+  readonly bolterBlossomTime?: number;
 }
 
 export type ActorKind = 'zizlikNode' | 'goojBackNode' | 'pscoutBeacon';
@@ -74,7 +82,7 @@ export interface ActorState {
   readonly active: boolean;
 }
 
-export type EffectKind = 'shipExplosion' | 'thrustDust' | 'nurtipExplosion';
+export type EffectKind = 'shipExplosion' | 'thrustDust' | 'nurtipExplosion' | 'shuggBurst';
 
 export interface EffectState {
   readonly id: number;

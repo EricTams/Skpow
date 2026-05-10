@@ -13,7 +13,11 @@ export class GameAudio {
   private combatMusicRequested = false;
   private readonly music = new Audio(audioAssets.music.combat);
   private readonly sfxPools = new Map<SfxId, HTMLAudioElement[]>();
+  private readonly sfxBuffers = new Map<SfxId, AudioBuffer>();
+  private readonly sfxBufferLoads = new Map<SfxId, Promise<AudioBuffer | null>>();
   private readonly listeners = new Set<AudioStateListener>();
+  private audioContext: AudioContext | null = null;
+  private sfxGain: GainNode | null = null;
 
   public constructor() {
     this.music.loop = true;
@@ -66,13 +70,15 @@ export class GameAudio {
       return;
     }
 
-    void this.unlock().then(() => {
-      const clip = this.getAvailableSfx(id);
-      clip.currentTime = 0;
-      void clip.play().catch(() => {
-        // Browsers may still reject playback until a trusted gesture; keep gameplay running.
-      });
-    });
+    void this.unlock();
+
+    const buffer = this.sfxBuffers.get(id);
+    if (buffer && this.playBufferedSfx(buffer)) {
+      return;
+    }
+
+    void this.loadSfxBuffer(id);
+    this.playPooledSfx(id);
   }
 
   public subscribe(listener: AudioStateListener): () => void {
@@ -89,11 +95,15 @@ export class GameAudio {
 
   private async unlock(): Promise<void> {
     if (this.unlocked) {
+      await this.resumeAudioContext();
       return;
     }
 
     this.unlocked = true;
     this.music.load();
+    this.warmSfxPools();
+    this.preloadSfxBuffers();
+    await this.resumeAudioContext();
   }
 
   private async playMusic(): Promise<void> {
@@ -108,6 +118,28 @@ export class GameAudio {
 
   private pauseMusic(): void {
     this.music.pause();
+  }
+
+  private playBufferedSfx(buffer: AudioBuffer): boolean {
+    const context = this.getAudioContext();
+    const gain = this.sfxGain;
+    if (!context || !gain || context.state === 'closed') {
+      return false;
+    }
+
+    const source = context.createBufferSource();
+    source.buffer = buffer;
+    source.connect(gain);
+    source.start();
+    return true;
+  }
+
+  private playPooledSfx(id: SfxId): void {
+    const clip = this.getAvailableSfx(id);
+    clip.currentTime = 0;
+    void clip.play().catch(() => {
+      // Browsers may still reject playback until a trusted gesture; keep gameplay running.
+    });
   }
 
   private getAvailableSfx(id: SfxId): HTMLAudioElement {
@@ -131,6 +163,85 @@ export class GameAudio {
     });
     this.sfxPools.set(id, pool);
     return pool;
+  }
+
+  private warmSfxPools(): void {
+    for (const id of Object.keys(audioAssets.sfx) as SfxId[]) {
+      for (const clip of this.getSfxPool(id)) {
+        clip.load();
+      }
+    }
+  }
+
+  private preloadSfxBuffers(): void {
+    if (!this.getAudioContext()) {
+      return;
+    }
+
+    for (const id of Object.keys(audioAssets.sfx) as SfxId[]) {
+      void this.loadSfxBuffer(id);
+    }
+  }
+
+  private loadSfxBuffer(id: SfxId): Promise<AudioBuffer | null> {
+    const existingBuffer = this.sfxBuffers.get(id);
+    if (existingBuffer) {
+      return Promise.resolve(existingBuffer);
+    }
+
+    const existingLoad = this.sfxBufferLoads.get(id);
+    if (existingLoad) {
+      return existingLoad;
+    }
+
+    const context = this.getAudioContext();
+    if (!context || context.state === 'closed') {
+      return Promise.resolve(null);
+    }
+
+    const load = fetch(audioAssets.sfx[id])
+      .then((response) => (response.ok ? response.arrayBuffer() : null))
+      .then((data) => (data ? context.decodeAudioData(data) : null))
+      .then((buffer) => {
+        if (buffer) {
+          this.sfxBuffers.set(id, buffer);
+        }
+        return buffer;
+      })
+      .catch(() => null)
+      .finally(() => {
+        this.sfxBufferLoads.delete(id);
+      });
+
+    this.sfxBufferLoads.set(id, load);
+    return load;
+  }
+
+  private getAudioContext(): AudioContext | null {
+    if (this.audioContext) {
+      return this.audioContext;
+    }
+
+    try {
+      this.audioContext = new AudioContext();
+      this.sfxGain = this.audioContext.createGain();
+      this.sfxGain.gain.value = SFX_VOLUME;
+      this.sfxGain.connect(this.audioContext.destination);
+      return this.audioContext;
+    } catch {
+      return null;
+    }
+  }
+
+  private async resumeAudioContext(): Promise<void> {
+    const context = this.getAudioContext();
+    if (!context || context.state !== 'suspended') {
+      return;
+    }
+
+    await context.resume().catch(() => {
+      // A user gesture may still be required; the next audio control/input can try again.
+    });
   }
 
   private emitChange(): void {

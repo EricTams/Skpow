@@ -143,6 +143,44 @@ describe('owner authority session', () => {
 
     expect(session.currentState.ships[0].custom.frogCharge).toBe(2);
   });
+
+  it('applies remote Bolter charge and blossom weapon events for visual prediction', () => {
+    const initialState = createInitialState(99, ['bolter', 'cannonade']);
+    const session = new OwnerAuthoritySession(initialState, 1);
+
+    session.applyOwnerWeaponEvent({
+      roundId: 0,
+      eventId: '0:1:primary:bolterChargeStart',
+      frame: 1,
+      ownerId: 0,
+      weapon: 'primary',
+      effectKind: 'bolterChargeStart',
+      x: initialState.ships[0].x,
+      y: initialState.ships[0].y,
+      vx: initialState.ships[0].vx,
+      vy: initialState.ships[0].vy,
+      angle: angle(0),
+      strength: 3,
+      durationFrames: 12,
+    });
+    session.applyOwnerWeaponEvent({
+      roundId: 0,
+      eventId: '0:2:secondary:bolterBlossom',
+      frame: 2,
+      ownerId: 0,
+      weapon: 'secondary',
+      effectKind: 'bolterBlossom',
+      x: initialState.ships[0].x,
+      y: initialState.ships[0].y,
+      vx: initialState.ships[0].vx,
+      vy: initialState.ships[0].vy,
+      angle: angle(0),
+      durationFrames: 200,
+    });
+
+    expect(session.currentState.ships[0].custom.bolterCharge).toBe(0);
+    expect(session.currentState.ships[0].custom.bolterBlossomActive).toBe(true);
+  });
 });
 
 function buildProjectile(overrides: Partial<ProjectileState> = {}): ProjectileState {

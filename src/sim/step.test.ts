@@ -379,6 +379,104 @@ describe('reference-backed ship abilities', () => {
     expect(released.projectiles[0]).toMatchObject({ kind: 'frogBubble', damage: 1, ttl: 72 });
   });
 
+  it('charges and releases Bolter bolts using one battery payment', () => {
+    const charging = stepGame(createInitialState(123, ['bolter', 'cannonade']), [InputBits.FirePrimary, 0]);
+    const released = stepGame(charging, [0, 0]);
+
+    expect(charging.ships[0].battery).toBe(26);
+    expect(charging.ships[0].custom.bolterCharge).toBe(1);
+    expect(released.ships[0].custom.bolterCharge).toBe(0);
+    expect(released.ships[0].primaryCooldown).toBe(40);
+    expect(released.projectiles[0]).toMatchObject({ kind: 'bolterShot', damage: 4, ttl: 43 });
+  });
+
+  it('runs Bolter blossom as a spinning stream that drains battery', () => {
+    let state = stepGame(createInitialState(123, ['bolter', 'cannonade']), [InputBits.FireSecondary, 0]);
+
+    expect(state.ships[0].custom.bolterBlossomActive).toBe(true);
+    expect(state.ships[0].secondaryCooldown).toBe(200);
+    for (let frame = 0; frame < 5; frame += 1) {
+      state = stepGame(state, [0, 0]);
+    }
+
+    expect(state.projectiles.filter((projectile) => projectile.kind === 'bolterSmallShot')).toHaveLength(5);
+    expect(state.ships[0].battery).toBe(29);
+    expect(state.ships[0].angle).not.toBe(angle(0));
+  });
+
+  it('keeps Bolter charge and blossom deterministic under replay', () => {
+    const initial = createInitialState(123, ['bolter', 'cannonade']);
+    const inputs = [
+      [InputBits.FirePrimary, 0],
+      [InputBits.FirePrimary, 0],
+      [0, 0],
+      [InputBits.FireSecondary, 0],
+      [0, 0],
+      [0, 0],
+    ] as const;
+
+    const first = runReplay(initial, inputs, hashState);
+    const second = runReplay(initial, inputs, hashState);
+
+    expect(first.frameHashes).toEqual(second.frameHashes);
+    expect(first.finalState).toEqual(second.finalState);
+  });
+
+  it('initializes Shugg with reference stats', () => {
+    const state = createInitialState(123, ['shugg', 'frog']);
+
+    expect(state.ships[0]).toMatchObject({ shipId: 'shugg', crew: 24, maxCrew: 24, battery: 24, maxBattery: 24 });
+    expect(getShipSpec('shugg').primary.framesPerShot).toBe(15);
+    expect(getShipSpec('shugg').secondary.framesPerShot).toBe(10);
+  });
+
+  it('fires Shugg primary as deterministic instant burst damage', () => {
+    const previewBase = withShips(createInitialState(123, ['shugg', 'frog']), [
+      { x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), freezeFrames: 1 },
+      { x: fixedFromInt(-1000), y: fixedFromInt(-1000), freezeFrames: 1 },
+    ]);
+    const preview = stepGame(previewBase, [InputBits.FirePrimary, 0]);
+    const firstBurst = preview.effects.find((effect) => effect.kind === 'shuggBurst');
+
+    expect(firstBurst).toBeDefined();
+    expect(preview.effects.filter((effect) => effect.kind === 'shuggBurst')).toHaveLength(3);
+    expect(preview.ships[0]).toMatchObject({ battery: 23, primaryCooldown: 15 });
+    expect(preview.projectiles).toHaveLength(0);
+    if (!firstBurst) {
+      return;
+    }
+
+    const hitBase = withShips(createInitialState(123, ['shugg', 'frog']), [
+      { x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), freezeFrames: 1 },
+      { x: firstBurst.x, y: firstBurst.y, freezeFrames: 1 },
+    ]);
+    const hit = stepGame(hitBase, [InputBits.FirePrimary, 0]);
+    expect(hit.ships[1].crew).toBe(29);
+  });
+
+  it('fires Shugg special pods that shove and scramble without damage', () => {
+    const fired = stepGame(createInitialState(123, ['shugg', 'frog']), [InputBits.FireSecondary, 0]);
+    const pods = fired.projectiles.filter((projectile) => projectile.kind === 'shuggPod');
+
+    expect(fired.ships[0]).toMatchObject({ battery: 23, secondaryCooldown: 10 });
+    expect(pods).toHaveLength(2);
+    expect(pods.every((projectile) => projectile.damage === 0 && projectile.ttl === 79)).toBe(true);
+
+    const hitState = withProjectile(createInitialState(123, ['shugg', 'frog']), buildProjectile({
+      ownerId: 0,
+      kind: 'shuggPod',
+      damage: 0,
+      x: fixedFromInt(-430),
+      y: fixedFromInt(-425),
+      vx: fixed(1),
+      vy: fixed(0),
+    }));
+    const hit = stepGame(hitState, [0, 0]);
+    expect(hit.ships[1].crew).toBe(30);
+    expect(hit.ships[1].angle).not.toBe(angle(128));
+    expect(hit.ships[1].vx).toBeGreaterThan(0);
+  });
+
   it('lets the Frog shield absorb one incoming damage then clear', () => {
     const shielded = stepGame(createInitialState(123, ['frog', 'cannonade']), [InputBits.FireSecondary, 0]);
     const hit = stepGame(withProjectileAtShip(shielded, 1, 0, 1), [0, 0]);
@@ -616,6 +714,47 @@ describe('reference-backed ship abilities', () => {
 
     expect(next.ships[0].battery).toBe(12);
     expect(next.ships[1].freezeFrames).toBe(150);
+  });
+
+  it('fires DoubleShip dual laser lanes as instant damage with beam pct state', () => {
+    const initial = createInitialState(123, ['doubleship', 'frog'], { gravityDivisor: 1_000_000, speedMultiplier: 1 });
+    const state = withShips(initial, [
+      { x: fixedFromInt(0), y: fixedFromInt(0), angle: angle(0), freezeFrames: 1 },
+      { x: fixedFromInt(200), y: fixedFromInt(0), angle: angle(128) },
+    ]);
+
+    const fired = stepGame(state, [InputBits.FirePrimary, 0]);
+    const heldDuringCooldown = stepGame(fired, [InputBits.FirePrimary, 0]);
+
+    expect(fired.projectiles).toHaveLength(0);
+    expect(fired.ships[0].battery).toBe(18);
+    expect(fired.ships[0].primaryCooldown).toBe(20);
+    expect(fired.ships[0].custom.doubleLeftPct).toBeLessThan(1);
+    expect(fired.ships[0].custom.doubleRightPct).toBeLessThan(1);
+    expect(fired.ships[1].crew).toBe(28);
+    expect(heldDuringCooldown.ships[1].crew).toBe(28);
+  });
+
+  it('flips DoubleShip velocity and facing while damaging nearby targets', () => {
+    const initial = createInitialState(123, ['doubleship', 'frog'], { gravityDivisor: 1_000_000, speedMultiplier: 1 });
+    const state = withShips(initial, [
+      { x: fixedFromInt(0), y: fixedFromInt(0), vx: fixed(1), vy: fixed(0.5), angle: angle(0), freezeFrames: 1 },
+      { x: fixedFromInt(200), y: fixedFromInt(0), angle: angle(128) },
+    ]);
+
+    const flipped = stepGame(state, [InputBits.FireSecondary, 0]);
+    const recovering = stepGame(flipped, [0, 0]);
+
+    expect(flipped.ships[0].battery).toBe(18);
+    expect(flipped.ships[0].secondaryCooldown).toBe(80);
+    expect(flipped.ships[0].angle).toBe(angle(128));
+    expect(fixedToNumber(flipped.ships[0].vx)).toBeCloseTo(-1, 2);
+    expect(fixedToNumber(flipped.ships[0].vy)).toBeCloseTo(-0.5, 2);
+    expect(flipped.ships[0].custom.doubleLeftAngle).toBeCloseTo(-Math.PI, 4);
+    expect(flipped.ships[0].custom.doubleRightAngle).toBeCloseTo(Math.PI, 4);
+    expect(flipped.ships[1].crew).toBe(29);
+    expect(recovering.ships[0].custom.doubleLeftAngle).toBeCloseTo(-Math.PI + 0.15, 4);
+    expect(recovering.ships[0].custom.doubleRightAngle).toBeCloseTo(Math.PI - 0.15, 4);
   });
 
   it('spawns Zizlik mirror nodes and shoots from them', () => {
@@ -1090,6 +1229,16 @@ function withShip(state: GameState, ship: Partial<ShipState>): GameState {
   return {
     ...state,
     ships: [{ ...state.ships[0], ...ship }, state.ships[1]],
+  };
+}
+
+function withShips(state: GameState, ships: readonly [Partial<ShipState>, Partial<ShipState>]): GameState {
+  return {
+    ...state,
+    ships: [
+      { ...state.ships[0], ...ships[0] },
+      { ...state.ships[1], ...ships[1] },
+    ],
   };
 }
 
