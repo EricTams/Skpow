@@ -4,6 +4,7 @@ import { GameAudio } from './audio';
 import { shipSfx } from './audioAssets';
 import { MenuInputBits, bindKeyboard, readGamepadMenuInput, readInputDeviceStatus, readLocalInputs, readPrimaryLocalInput } from './input';
 import { createFixedLoop, SIM_FPS } from './loop';
+import { decodeNetworkControlMessage, encodeNetworkControlMessage, type NetworkFleetShip } from './net/controlMessages';
 import { getFirebaseClient, isFirebaseConfigured, observeAnonymousUser, signInWithAnonymousAuth } from './net/firebase';
 import { getLobbyKind, LobbyRepository, type LobbyKind, type LobbyRecord } from './net/lobby';
 import { NetworkMatchSession, type NetworkMatchStatus } from './net/matchSession';
@@ -347,7 +348,7 @@ interface PersistentFleetShipState {
 }
 
 interface BattleSession {
-  readonly mode: 'single' | 'hotseat';
+  readonly mode: 'single' | 'hotseat' | 'network';
   readonly budget: number;
   readonly fleets: readonly [readonly FleetShip[], readonly FleetShip[]];
   readonly selectedShipUids: readonly [string | null, string | null];
@@ -393,6 +394,15 @@ type AppPhase =
       readonly selectingSideIds: readonly (0 | 1)[];
       readonly message?: string;
     }
+  | {
+      readonly name: 'networkShipSelect';
+      readonly role: ConnectionRole;
+      readonly budget: number;
+      readonly lobbyId: string;
+      readonly session: BattleSession;
+      readonly selectingSideIds: readonly (0 | 1)[];
+      readonly message?: string;
+    }
   | { readonly name: 'fighting'; readonly session: BattleSession; readonly handledWinnerId: number | null }
   | { readonly name: 'hotseatFighting'; readonly session: BattleSession; readonly handledWinnerId: number | null }
   | { readonly name: 'aiDemo'; readonly round: number }
@@ -401,9 +411,16 @@ type AppPhase =
   | { readonly name: 'multiplayerMenu' }
   | { readonly name: 'hostSetup' }
   | { readonly name: 'lobbyBrowser' }
-  | { readonly name: 'networkConnecting'; readonly role: ConnectionRole; readonly budget: number; readonly lobbyId: string }
+  | { readonly name: 'networkConnecting'; readonly role: ConnectionRole; readonly budget: number; readonly lobbyId: string; readonly title?: string; readonly detail?: string }
   | { readonly name: 'networkFleetBuild'; readonly role: ConnectionRole; readonly budget: number; readonly lobbyId: string; readonly fleet: readonly FleetShip[] }
-  | { readonly name: 'networkFight'; readonly handledWinnerId: number | null }
+  | {
+      readonly name: 'networkFight';
+      readonly role?: ConnectionRole;
+      readonly budget?: number;
+      readonly lobbyId?: string;
+      readonly session?: BattleSession;
+      readonly handledWinnerId: number | null;
+    }
   | { readonly name: 'networkResult'; readonly winnerId: number };
 
 type MatchLoadout = readonly [ShipCatalogId, ShipCatalogId];
@@ -426,8 +443,11 @@ let peerConnectionState: ConnectionState = 'idle';
 let networkMatch: NetworkMatchSession | null = null;
 let networkMatchStatus: NetworkMatchStatus | null = null;
 let networkAiRound = 0;
+let networkHumanRound = 0;
 let pendingHostShip: ShipCatalogId | null = null;
 let pendingJoinerShip: ShipCatalogId | null = null;
+let pendingNetworkFleets: [readonly FleetShip[] | null, readonly FleetShip[] | null] = [null, null];
+let networkBattleSession: BattleSession | null = null;
 let lastInputStatusText = '';
 let lastInputDebugText = '';
 let inputStatusRenderTick = 0;
@@ -733,11 +753,21 @@ createFixedLoop(
         return;
       }
       if (outcome.kind === 'winner' && !networkMatchStatus?.aiDemo && appPhase.handledWinnerId !== outcome.winnerId) {
-        appPhase = { name: 'networkResult', winnerId: outcome.winnerId };
-        renderMenu();
+        if (appPhase.session && appPhase.role && appPhase.budget !== undefined && appPhase.lobbyId) {
+          sendNetworkRoundResolved({ kind: 'winner', winnerId: outcome.winnerId as PlayerSide });
+          resolveNetworkRound(appPhase.session, outcome.winnerId, appPhase.role, appPhase.budget, appPhase.lobbyId);
+        } else {
+          appPhase = { name: 'networkResult', winnerId: outcome.winnerId };
+          renderMenu();
+        }
       } else if (outcome.kind === 'draw' && !networkMatchStatus?.aiDemo && appPhase.handledWinnerId === null) {
-        appPhase = { name: 'finalResult', title: 'Draw', detail: 'Both online ships were destroyed.' };
-        renderMenu();
+        if (appPhase.session && appPhase.role && appPhase.budget !== undefined && appPhase.lobbyId) {
+          sendNetworkRoundResolved({ kind: 'draw' });
+          resolveNetworkMutualDestruction(appPhase.session, appPhase.role, appPhase.budget, appPhase.lobbyId);
+        } else {
+          appPhase = { name: 'finalResult', title: 'Draw', detail: 'Both online ships were destroyed.' };
+          renderMenu();
+        }
       }
     }
   },
@@ -1318,6 +1348,9 @@ function renderMenu(): void {
     case 'hotseatShipSelect':
       menuOverlay.innerHTML = renderHotseatShipSelectMenu(appPhase);
       break;
+    case 'networkShipSelect':
+      menuOverlay.innerHTML = renderNetworkShipSelectMenu(appPhase);
+      break;
     case 'roundResult':
       menuOverlay.innerHTML = renderRoundResultMenu(appPhase);
       break;
@@ -1345,7 +1378,7 @@ function renderMenu(): void {
       menuOverlay.innerHTML = renderFleetBuildMenu(appPhase);
       break;
     case 'networkResult':
-      menuOverlay.innerHTML = renderFinalResultMenu(`Player ${appPhase.winnerId + 1} wins`, 'The online duel is complete.');
+      menuOverlay.innerHTML = renderFinalResultMenu(`Player ${appPhase.winnerId + 1} wins`, 'The online fleet battle is complete.');
       break;
     case 'fighting':
     case 'hotseatFighting':
@@ -2049,10 +2082,9 @@ function renderBudgetMenu(title: string, action: string, detail: string, backBut
 function renderFleetBuildMenu(phase: Extract<AppPhase, { readonly name: 'fleetBuild' | 'networkFleetBuild' }>): string {
   const remaining = getRemainingBudget(phase.fleet, phase.budget);
   const isNetwork = phase.name === 'networkFleetBuild';
-  const activeSide = !isNetwork || phase.role === 'host' ? 0 : 1;
   const modeLabel = isNetwork ? 'Multiplayer' : 'Single Player';
   const detail = isNetwork
-    ? 'Build your fleet here. For now, Ready launches the first ship as the online starting ship.'
+    ? 'Build your fleet here. After both players ready up, each player chooses a starting ship.'
     : 'Add ships to your fleet, then pick your first champion when the battle begins.';
   return `
     <section
@@ -2070,10 +2102,11 @@ function renderFleetBuildMenu(phase: Extract<AppPhase, { readonly name: 'fleetBu
         fleet: phase.fleet,
         budget: phase.budget,
         remaining,
-        activeSide,
-        hideP2: !isNetwork,
-        readyLabel: isNetwork ? 'Ready Starting Ship' : 'Ready',
+        activeSide: 0,
+        hideP2: true,
+        readyLabel: isNetwork ? 'Ready Fleet' : 'Ready',
         backLabel: isNetwork ? 'Leave Match' : 'Back',
+        fleetLabel: isNetwork ? 'Your Fleet' : 'P1 Fleet',
       })}
     </section>
   `;
@@ -2136,6 +2169,7 @@ function renderFleetBuilderScreen(options: {
   readonly hideP2: boolean;
   readonly readyLabel: string;
   readonly backLabel: string;
+  readonly fleetLabel: string;
 }): string {
   const fleets: readonly [readonly FleetShip[], readonly FleetShip[]] =
     options.activeSide === 0 ? [options.fleet, []] : [[], options.fleet];
@@ -2150,7 +2184,7 @@ function renderFleetBuilderScreen(options: {
       <div class="fleet-stage" aria-label="Fleet roster">
         ${renderFleetPanel({
           fleet: fleets[0],
-          label: 'P1 Fleet',
+          label: options.fleetLabel,
           sideId: 0,
           isEditable: options.activeSide === 0,
           isHidden: false,
@@ -2380,8 +2414,16 @@ function isFleetBuilderPhase(): boolean {
   return appPhase.name === 'fleetBuild' || appPhase.name === 'networkFleetBuild' || appPhase.name === 'hotseatFleetBuild';
 }
 
+function getNetworkLocalSide(role: ConnectionRole): PlayerSide {
+  return role === 'host' ? 0 : 1;
+}
+
+function getNetworkRemoteSide(role: ConnectionRole): PlayerSide {
+  return role === 'host' ? 1 : 0;
+}
+
 function isShipSelectPhase(): boolean {
-  return appPhase.name === 'shipSelect' || appPhase.name === 'hotseatShipSelect';
+  return appPhase.name === 'shipSelect' || appPhase.name === 'hotseatShipSelect' || appPhase.name === 'networkShipSelect';
 }
 
 function handleFleetBuilderKeyboardNav(event: KeyboardEvent): boolean {
@@ -2449,10 +2491,16 @@ function updateFleetBuilderGamepadNav(): void {
     return;
   }
 
-  updateFleetBuilderGamepadNavForSide(0);
   if (appPhase.name === 'hotseatFleetBuild') {
+    updateFleetBuilderGamepadNavForSide(0);
     updateFleetBuilderGamepadNavForSide(1);
+    return;
   }
+
+  previousFleetBuilderInputs[1] = 0;
+  fleetBuilderNavRepeatFrames[1] = 0;
+  clearPlayerInteractionIndicator('fleet', 1);
+  updateFleetBuilderGamepadNavForSide(0, 0);
 }
 
 function updateShipSelectGamepadNav(): void {
@@ -2462,13 +2510,21 @@ function updateShipSelectGamepadNav(): void {
     return;
   }
 
-  updateShipSelectGamepadNavForSide(0);
   if (appPhase.name === 'hotseatShipSelect') {
+    updateShipSelectGamepadNavForSide(0);
     updateShipSelectGamepadNavForSide(1);
+    return;
   }
+
+  const sideId = getDefaultShipSelectSide();
+  const inactiveSideId = sideId === 0 ? 1 : 0;
+  previousShipSelectInputs[inactiveSideId] = 0;
+  shipSelectNavRepeatFrames[inactiveSideId] = 0;
+  clearPlayerInteractionIndicator('shipSelect', inactiveSideId);
+  updateShipSelectGamepadNavForSide(sideId, 0);
 }
 
-function updateShipSelectGamepadNavForSide(sideId: PlayerSide): void {
+function updateShipSelectGamepadNavForSide(sideId: PlayerSide, inputIndex: number = sideId): void {
   if (!isShipSelectSideActive(sideId)) {
     previousShipSelectInputs[sideId] = 0;
     shipSelectNavRepeatFrames[sideId] = 0;
@@ -2476,7 +2532,7 @@ function updateShipSelectGamepadNavForSide(sideId: PlayerSide): void {
     return;
   }
 
-  const input = readGamepadMenuInput(sideId);
+  const input = readGamepadMenuInput(inputIndex);
   const pressed = input & ~previousShipSelectInputs[sideId];
   if (shipSelectNavRepeatFrames[sideId] > 0) {
     shipSelectNavRepeatFrames[sideId] -= 1;
@@ -2500,8 +2556,8 @@ function updateShipSelectGamepadNavForSide(sideId: PlayerSide): void {
   previousShipSelectInputs[sideId] = input;
 }
 
-function updateFleetBuilderGamepadNavForSide(sideId: PlayerSide): void {
-  const input = readGamepadMenuInput(sideId);
+function updateFleetBuilderGamepadNavForSide(sideId: PlayerSide, inputIndex: number = sideId): void {
+  const input = readGamepadMenuInput(inputIndex);
   const pressed = input & ~previousFleetBuilderInputs[sideId];
   if (fleetBuilderNavRepeatFrames[sideId] > 0) {
     fleetBuilderNavRepeatFrames[sideId] -= 1;
@@ -2595,7 +2651,7 @@ function readFleetBuilderKeyboardCancelSide(code: string): PlayerSide | null {
 function readShipSelectKeyboardDirection(code: string): { readonly sideId: PlayerSide; readonly direction: FleetBuilderNavDirection } | null {
   const p1Direction = readFleetBuilderKeyboardDirection(code);
   if (p1Direction) {
-    return { sideId: 0, direction: p1Direction };
+    return { sideId: getDefaultShipSelectSide(), direction: p1Direction };
   }
 
   if (appPhase.name !== 'hotseatShipSelect') {
@@ -2618,11 +2674,11 @@ function readShipSelectKeyboardDirection(code: string): { readonly sideId: Playe
 
 function readShipSelectKeyboardActivateSide(code: string): PlayerSide | null {
   if (code === 'Space') {
-    return 0;
+    return getDefaultShipSelectSide();
   }
 
   if (code === 'Enter' || code === 'NumpadEnter') {
-    return appPhase.name === 'hotseatShipSelect' ? 1 : 0;
+    return appPhase.name === 'hotseatShipSelect' ? 1 : getDefaultShipSelectSide();
   }
 
   return null;
@@ -2630,7 +2686,7 @@ function readShipSelectKeyboardActivateSide(code: string): PlayerSide | null {
 
 function readShipSelectKeyboardCancelSide(code: string): PlayerSide | null {
   if (code === 'KeyE' || code === 'Escape') {
-    return 0;
+    return getDefaultShipSelectSide();
   }
 
   if (code === 'KeyO' && appPhase.name === 'hotseatShipSelect') {
@@ -2660,10 +2716,11 @@ function readFleetBuilderInputDirection(input: number): FleetBuilderNavDirection
 function queueFleetBuilderFocusRestore(): void {
   window.setTimeout(() => {
     if (isFleetBuilderPhase()) {
-      restoreFleetBuilderFocus(0);
       if (appPhase.name === 'hotseatFleetBuild') {
+        restoreFleetBuilderFocus(0);
         restoreFleetBuilderFocus(1);
       } else {
+        restoreFleetBuilderFocus(0);
         clearPlayerInteractionIndicator('fleet', 1);
       }
     }
@@ -2707,8 +2764,9 @@ function queueShipSelectFocusRestore(): void {
           }
         }
       } else {
-        restoreShipSelectFocus(getDefaultShipSelectSide());
-        clearPlayerInteractionIndicator('shipSelect', 1);
+        const sideId = getDefaultShipSelectSide();
+        restoreShipSelectFocus(sideId);
+        clearPlayerInteractionIndicator('shipSelect', sideId === 0 ? 1 : 0);
       }
     }
   }, 0);
@@ -3053,6 +3111,27 @@ function renderHotseatShipSelectMenu(phase: Extract<AppPhase, { readonly name: '
   `;
 }
 
+function renderNetworkShipSelectMenu(phase: Extract<AppPhase, { readonly name: 'networkShipSelect' }>): string {
+  const sideId = getNetworkLocalSide(phase.role);
+  const isSelecting = phase.selectingSideIds.includes(sideId);
+  const selectedShip = getSelectedFleetShip(phase.session, sideId);
+  const status = isSelecting
+    ? 'Choose a ship'
+    : selectedShip
+      ? `${getShipCatalogEntry(selectedShip.catalogId).name} locked in`
+      : 'Waiting for ship selection';
+  return `
+    <section class="menu-card menu-card-wide">
+      ${renderMenuBrand()}
+      <p class="menu-kicker">Multiplayer Ship Select</p>
+      <h2>Select Ship</h2>
+      <p>${phase.message ?? 'Choose your next living ship. The host starts the next round once both required picks are locked.'}</p>
+      <p>${status}</p>
+      ${renderShipSelectFleetGrid(phase.session.fleets[sideId], sideId, isSelecting, selectedShip?.uid ?? null)}
+    </section>
+  `;
+}
+
 function renderHotseatShipSelectPanel(session: BattleSession, sideId: PlayerSide, isSelecting: boolean): string {
   const selectedShip = getSelectedFleetShip(session, sideId);
   const status = isSelecting ? 'Choose a ship' : selectedShip ? `${getShipCatalogEntry(selectedShip.catalogId).name} locked in` : 'Waiting';
@@ -3264,12 +3343,14 @@ function findDevLobby(repository: LobbyRepository, timeoutMs: number): Promise<L
 }
 
 function renderNetworkConnectingMenu(phase: Extract<AppPhase, { readonly name: 'networkConnecting' }>): string {
+  const title = phase.title ?? (phase.role === 'host' ? 'Waiting For Joiner' : 'Joining Lobby');
+  const detail = phase.detail ?? `Lobby ${phase.lobbyId} | ${phase.budget} pts | Peer ${peerConnectionState}`;
   return `
     <section class="menu-card">
       ${renderMenuBrand()}
       <p class="menu-kicker">Multiplayer</p>
-      <h2>${phase.role === 'host' ? 'Waiting For Joiner' : 'Joining Lobby'}</h2>
-      <p>Lobby ${phase.lobbyId} | ${phase.budget} pts | Peer ${peerConnectionState}</p>
+      <h2>${title}</h2>
+      <p>${detail}</p>
       <div class="menu-actions">
         <button type="button" data-action="back">Leave Lobby</button>
       </div>
@@ -3309,7 +3390,11 @@ function addShipToPlayerFleet(shipId: ShipCatalogId, sideId: PlayerSide = 0): vo
     return;
   }
 
-  if ((appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') || sideId !== 0 || appPhase.fleet.length >= MAX_FLEET_SLOTS) {
+  if (appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') {
+    return;
+  }
+
+  if (sideId !== 0 || appPhase.fleet.length >= MAX_FLEET_SLOTS) {
     return;
   }
 
@@ -3323,9 +3408,9 @@ function addShipToPlayerFleet(shipId: ShipCatalogId, sideId: PlayerSide = 0): vo
     ...appPhase,
     fleet: [...appPhase.fleet, { uid: `player-${fleetSerial}`, catalogId: shipId, alive: true }],
   };
-  fleetBuilderPickingSlotIndices[0] = null;
-  fleetBuilderConfirmingBack[0] = false;
-  fleetBuilderNavTargets[0] = { nav: 'slot', index: Math.min(appPhase.fleet.length, MAX_FLEET_SLOTS - 1) };
+  fleetBuilderPickingSlotIndices[sideId] = null;
+  fleetBuilderConfirmingBack[sideId] = false;
+  fleetBuilderNavTargets[sideId] = { nav: 'slot', index: Math.min(appPhase.fleet.length, MAX_FLEET_SLOTS - 1) };
   renderMenu();
 }
 
@@ -3351,7 +3436,11 @@ function removeShipFromPlayerFleet(uid: string, sideId: PlayerSide = 0): void {
     return;
   }
 
-  if ((appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') || sideId !== 0) {
+  if (appPhase.name !== 'fleetBuild' && appPhase.name !== 'networkFleetBuild') {
+    return;
+  }
+
+  if (sideId !== 0) {
     return;
   }
 
@@ -3359,8 +3448,8 @@ function removeShipFromPlayerFleet(uid: string, sideId: PlayerSide = 0): void {
     ...appPhase,
     fleet: appPhase.fleet.filter((ship) => ship.uid !== uid),
   };
-  fleetBuilderPickingSlotIndices[0] = null;
-  fleetBuilderConfirmingBack[0] = false;
+  fleetBuilderPickingSlotIndices[sideId] = null;
+  fleetBuilderConfirmingBack[sideId] = false;
   renderMenu();
 }
 
@@ -3429,31 +3518,73 @@ function readyNetworkFleet(): void {
     return;
   }
 
-  const selectedShip = appPhase.fleet[0].catalogId;
-  const selectedName = getShipCatalogEntry(selectedShip).name;
   const { role, budget, lobbyId } = appPhase;
+  const sideId = getNetworkLocalSide(role);
+  pendingNetworkFleets = sideId === 0 ? [appPhase.fleet, pendingNetworkFleets[1]] : [pendingNetworkFleets[0], appPhase.fleet];
+  networkBattleSession = null;
+  peerSession?.sendControlMessage(
+    encodeNetworkControlMessage({
+      type: 'fleetReady',
+      sideId,
+      fleet: appPhase.fleet.map(toNetworkFleetShip),
+    }),
+  );
+  log(`Fleet ready with ${appPhase.fleet.length} ships. Waiting for peer fleet...`);
+  appPhase = { name: 'networkConnecting', role, budget, lobbyId };
+  renderMenu();
+  maybeStartNetworkShipSelect(role, budget, lobbyId);
+}
 
-  if (role === 'joiner') {
-    currentLoadout = [DEFAULT_MATCH_SHIPS[0], selectedShip];
-    renderer.setShipLoadout(currentLoadout);
-    renderHud(currentLoadout);
-    networkMatch = new NetworkMatchSession('joiner', { readyImmediately: true });
-    networkMatchStatus = networkMatch.status;
-    presentationCorrection = null;
-    if (!peerSession?.sendControlMessage(`selectedShip:${selectedShip}`)) {
-      log('Could not send selected ship to host yet.');
-    }
-    log(`Ready with ${selectedName}. Waiting for host config...`);
-    appPhase = { name: 'networkConnecting', role, budget, lobbyId };
-    renderMenu();
+function toNetworkFleetShip(ship: FleetShip): NetworkFleetShip {
+  return ship;
+}
+
+function fromNetworkFleetShip(ship: NetworkFleetShip): FleetShip {
+  return ship;
+}
+
+function maybeStartNetworkShipSelect(role: ConnectionRole, budget: number, lobbyId: string): void {
+  const fleets = pendingNetworkFleets;
+  if (!fleets[0] || !fleets[1]) {
     return;
   }
 
-  pendingHostShip = selectedShip;
-  log(`Ready with ${selectedName}. Waiting for joiner...`);
-  appPhase = { name: 'networkConnecting', role, budget, lobbyId };
+  const session: BattleSession =
+    networkBattleSession?.mode === 'network'
+      ? networkBattleSession
+      : { mode: 'network', budget, fleets: [fleets[0], fleets[1]], selectedShipUids: [null, null] };
+  networkBattleSession = session;
+  if (role === 'joiner' && !networkMatch) {
+    networkMatch = new NetworkMatchSession('joiner');
+    networkMatchStatus = networkMatch.status;
+    presentationCorrection = null;
+  }
+  if (networkMatch) {
+    if (role === 'joiner') {
+      appPhase = {
+        name: 'networkShipSelect',
+        role,
+        budget,
+        lobbyId,
+        session,
+        selectingSideIds: getSidesNeedingSelection(session),
+        message: 'Both players pick the first ship for their fleets.',
+      };
+      renderMenu();
+    }
+    return;
+  }
+
+  appPhase = {
+    name: 'networkShipSelect',
+    role,
+    budget,
+    lobbyId,
+    session,
+    selectingSideIds: getSidesNeedingSelection(session),
+    message: 'Both players pick the first ship for their fleets.',
+  };
   renderMenu();
-  startNetworkMatchWhenReady(role, budget, lobbyId);
 }
 
 function autoReadyAiJoiner(budget: number, lobbyId: string): void {
@@ -3475,6 +3606,11 @@ function autoReadyAiJoiner(budget: number, lobbyId: string): void {
 function choosePlayerShip(uid: string, sideId: PlayerSide = 0): void {
   if (appPhase.name === 'hotseatShipSelect') {
     chooseHotseatShip(uid, sideId);
+    return;
+  }
+
+  if (appPhase.name === 'networkShipSelect') {
+    chooseNetworkShip(uid, sideId);
     return;
   }
 
@@ -3512,6 +3648,75 @@ function chooseHotseatShip(uid: string, sideId: PlayerSide): void {
   }
 
   startHotseatFight(session);
+}
+
+function chooseNetworkShip(uid: string, sideId: PlayerSide): void {
+  if (appPhase.name !== 'networkShipSelect' || !appPhase.selectingSideIds.includes(sideId)) {
+    return;
+  }
+
+  const { role, budget, lobbyId } = appPhase;
+  const localSide = getNetworkLocalSide(role);
+  if (sideId !== localSide) {
+    return;
+  }
+
+  const livingShip = appPhase.session.fleets[sideId].find((ship) => ship.uid === uid && ship.alive);
+  if (!livingShip) {
+    return;
+  }
+
+  const session = withSelectedShip(appPhase.session, sideId, uid);
+  networkBattleSession = session;
+  peerSession?.sendControlMessage(encodeNetworkControlMessage({ type: 'shipPicked', sideId, uid }));
+  const selectingSideIds = appPhase.selectingSideIds.filter((candidate) => candidate !== sideId);
+  appPhase = {
+    ...appPhase,
+    session,
+    selectingSideIds,
+    message: selectingSideIds.length > 0 ? 'Ship locked in. Waiting for the other player.' : 'Ship locked in. Waiting for host round config.',
+  };
+  renderMenu();
+  maybeStartSelectedNetworkRound(role, budget, lobbyId, session);
+}
+
+function maybeStartSelectedNetworkRound(role: ConnectionRole, budget: number, lobbyId: string, session: BattleSession): void {
+  if (role !== 'host' || !getSelectedFleetShip(session, 0) || !getSelectedFleetShip(session, 1)) {
+    return;
+  }
+
+  startNetworkFight(role, budget, lobbyId, session);
+}
+
+function startNetworkFight(role: ConnectionRole, budget: number, lobbyId: string, session: BattleSession): void {
+  const hostShip = getSelectedFleetShip(session, 0);
+  const joinerShip = getSelectedFleetShip(session, 1);
+  if (role !== 'host' || !hostShip || !joinerShip) {
+    return;
+  }
+
+  networkHumanRound += 1;
+  currentLoadout = [hostShip.catalogId, joinerShip.catalogId];
+  const seed = Date.now() >>> 0;
+  const shipOverrides = createRoundStartOverrides(session);
+  renderer.setShipLoadout(currentLoadout);
+  renderHud(currentLoadout);
+  state = createInitialState(seed, currentLoadout, getGameplaySettings(), shipOverrides);
+  networkMatch = new NetworkMatchSession('host', {
+    roundId: networkHumanRound,
+    seed,
+    loadout: currentLoadout,
+    gameplay: getGameplaySettings(),
+    shipOverrides,
+    readyImmediately: true,
+  });
+  presentationCorrection = null;
+  sendGameplayPackets(networkMatch.takeOutgoingPackets());
+  networkMatchStatus = networkMatch.status;
+  networkBattleSession = session;
+  appPhase = { name: 'networkFight', role, budget, lobbyId, session, handledWinnerId: null };
+  renderMenu();
+  log(`Network round ${networkHumanRound}: ${getShipCatalogEntry(currentLoadout[0]).name} vs ${getShipCatalogEntry(currentLoadout[1]).name}`);
 }
 
 function startLocalFight(session: BattleSession): void {
@@ -3575,6 +3780,7 @@ function createRoundStartOverride(fleetShip: FleetShip | null): RoundStartShipOv
 function persistRoundFleetState(
   session: BattleSession,
   eliminatedSideIds: ReadonlySet<number>,
+  roundState: GameState = state,
 ): [readonly FleetShip[], readonly FleetShip[]] {
   return session.fleets.map((fleet, sideId) => {
     const selectedUid = session.selectedShipUids[sideId];
@@ -3591,12 +3797,12 @@ function persistRoundFleetState(
         return { ...fleetShip, alive: false, persistent: undefined };
       }
 
-      const roundShip = state.ships[sideId];
+      const roundShip = roundState.ships[sideId];
       if (!roundShip?.alive) {
         return { ...fleetShip, alive: false, persistent: undefined };
       }
 
-      return { ...fleetShip, persistent: createPersistentFleetShipState(roundShip, state.actors) };
+      return { ...fleetShip, persistent: createPersistentFleetShipState(roundShip, roundState.actors) };
     });
   }) as [readonly FleetShip[], readonly FleetShip[]];
 }
@@ -3627,7 +3833,7 @@ function createPersistentCustomState(ship: ShipState): ShipCustomState {
 
 function resolveLocalRound(session: BattleSession, winnerId: number): void {
   const loserId = winnerId === 0 ? 1 : 0;
-  const nextFleets = persistRoundFleetState(session, new Set([loserId]));
+  const nextFleets = persistRoundFleetState(session, new Set([loserId]), networkMatch?.currentState ?? state);
   const nextSession: BattleSession = {
     ...session,
     fleets: nextFleets,
@@ -3654,7 +3860,7 @@ function resolveLocalRound(session: BattleSession, winnerId: number): void {
 }
 
 function resolveLocalMutualDestruction(session: BattleSession): void {
-  const nextFleets = persistRoundFleetState(session, new Set([0, 1]));
+  const nextFleets = persistRoundFleetState(session, new Set([0, 1]), networkMatch?.currentState ?? state);
   const nextSession: BattleSession = {
     ...session,
     fleets: nextFleets,
@@ -3681,6 +3887,97 @@ function resolveLocalMutualDestruction(session: BattleSession): void {
     appPhase = { name: 'shipSelect', session: nextSession, message: 'Both ships were destroyed. Pick a new ship.' };
   }
 
+  renderMenu();
+}
+
+function resolveNetworkRound(session: BattleSession, winnerId: number, role: ConnectionRole, budget: number, lobbyId: string): void {
+  const loserId = winnerId === 0 ? 1 : 0;
+  const nextFleets = persistRoundFleetState(session, new Set([loserId]));
+  const nextSession: BattleSession = {
+    ...session,
+    fleets: nextFleets,
+    selectedShipUids: loserId === 0 ? [null, session.selectedShipUids[1]] : [session.selectedShipUids[0], null],
+  };
+
+  endNetworkRoundSession();
+  if (!hasLivingShips(nextSession.fleets[loserId])) {
+    networkBattleSession = nextSession;
+    appPhase = {
+      name: 'finalResult',
+      title: `${getSideName(winnerId, 'network')} wins`,
+      detail: `${getSideName(loserId, 'network')} has no ships remaining.`,
+    };
+    renderMenu();
+    return;
+  }
+
+  enterNetworkShipSelect(role, budget, lobbyId, nextSession, [loserId as PlayerSide], `${getSideName(loserId, 'network')} lost that ship. Pick a new one to challenge the winner.`);
+}
+
+function sendNetworkRoundResolved(outcome: { readonly kind: 'winner'; readonly winnerId: PlayerSide } | { readonly kind: 'draw' }): void {
+  peerSession?.sendControlMessage(encodeNetworkControlMessage({ type: 'roundResolved', outcome }));
+}
+
+function resolveNetworkMutualDestruction(session: BattleSession, role: ConnectionRole, budget: number, lobbyId: string): void {
+  const nextFleets = persistRoundFleetState(session, new Set([0, 1]));
+  const nextSession: BattleSession = {
+    ...session,
+    fleets: nextFleets,
+    selectedShipUids: [null, null],
+  };
+  const playerOneAlive = hasLivingShips(nextSession.fleets[0]);
+  const playerTwoAlive = hasLivingShips(nextSession.fleets[1]);
+
+  endNetworkRoundSession();
+  if (!playerOneAlive && !playerTwoAlive) {
+    networkBattleSession = nextSession;
+    appPhase = { name: 'finalResult', title: 'Draw', detail: 'Both fleets were destroyed.' };
+    renderMenu();
+  } else if (!playerOneAlive) {
+    networkBattleSession = nextSession;
+    appPhase = { name: 'finalResult', title: 'Player 2 wins', detail: 'Both ships were destroyed, and Player 1 has no ships remaining.' };
+    renderMenu();
+  } else if (!playerTwoAlive) {
+    networkBattleSession = nextSession;
+    appPhase = { name: 'finalResult', title: 'Player 1 wins', detail: 'Both ships were destroyed, and Player 2 has no ships remaining.' };
+    renderMenu();
+  } else {
+    enterNetworkShipSelect(role, budget, lobbyId, nextSession, [0, 1], 'Both ships were destroyed. Pick new ships.');
+  }
+}
+
+function endNetworkRoundSession(): void {
+  clearPendingGameplayPackets();
+  networkMatch = null;
+  networkMatchStatus = null;
+  presentationCorrection = null;
+}
+
+function enterNetworkShipSelect(
+  role: ConnectionRole,
+  budget: number,
+  lobbyId: string,
+  session: BattleSession,
+  selectingSideIds: readonly PlayerSide[],
+  message: string,
+): void {
+  networkBattleSession = session;
+  pendingNetworkFleets = [session.fleets[0], session.fleets[1]];
+  const localSide = getNetworkLocalSide(role);
+  if (role === 'joiner') {
+    networkMatch = new NetworkMatchSession('joiner');
+    networkMatchStatus = networkMatch.status;
+  }
+  appPhase = selectingSideIds.includes(localSide)
+    ? { name: 'networkShipSelect', role, budget, lobbyId, session, selectingSideIds, message }
+    : {
+        name: 'networkConnecting',
+        role,
+        budget,
+        lobbyId,
+        title: 'Opponent Is Choosing A Ship',
+        detail: 'You won the last round. Waiting for your opponent to choose their next ship.',
+      };
   renderMenu();
 }
 
@@ -3981,6 +4278,9 @@ async function createHostLobby(
   networkMatchStatus = null;
   pendingHostShip = null;
   pendingJoinerShip = null;
+  pendingNetworkFleets = [null, null];
+  networkBattleSession = null;
+  networkHumanRound = 0;
   suppressPeerDisconnectPopup = false;
   peerSession = createPeerSession('host', lobbyId, repository, budget);
   appPhase = { name: 'networkConnecting', role: 'host', budget, lobbyId };
@@ -4012,6 +4312,9 @@ async function joinLobby(lobbyId: string, uid: string, repository: LobbyReposito
   }
   networkMatch = null;
   networkMatchStatus = null;
+  pendingNetworkFleets = [null, null];
+  networkBattleSession = null;
+  networkHumanRound = 0;
   suppressPeerDisconnectPopup = false;
   peerSession = createPeerSession('joiner', lobbyId, repository, budget);
   appPhase = { name: 'networkConnecting', role: 'joiner', budget, lobbyId };
@@ -4043,7 +4346,8 @@ function createPeerSession(
         const wasInActiveFlow =
           appPhase.name === 'networkFight' ||
           appPhase.name === 'networkConnecting' ||
-          appPhase.name === 'networkFleetBuild';
+          appPhase.name === 'networkFleetBuild' ||
+          appPhase.name === 'networkShipSelect';
         networkMatch = null;
         networkMatchStatus = null;
         if (wasInActiveFlow) {
@@ -4096,7 +4400,14 @@ function createPeerSession(
         networkMatchStatus = networkMatch.status;
         syncNetworkLoadoutFromMatch();
         if (isSessionConfig) {
-          appPhase = { name: 'networkFight', handledWinnerId: null };
+          appPhase = {
+            name: 'networkFight',
+            role,
+            budget,
+            lobbyId,
+            session: networkBattleSession ?? undefined,
+            handledWinnerId: null,
+          };
           renderMenu();
         }
         updatePeerStatus();
@@ -4166,6 +4477,67 @@ function startNetworkMatchWhenReady(role: ConnectionRole, budget: number, lobbyI
 }
 
 function handleNetworkControlMessage(role: ConnectionRole, budget: number, lobbyId: string, message: string): void {
+  const controlMessage = decodeNetworkControlMessage(message);
+  if (controlMessage) {
+    if (controlMessage.type === 'fleetReady') {
+      if (controlMessage.sideId !== getNetworkRemoteSide(role)) {
+        log(`Ignored control message for unexpected side ${controlMessage.sideId}.`);
+        return;
+      }
+
+      const fleet = controlMessage.fleet.map(fromNetworkFleetShip);
+      pendingNetworkFleets = controlMessage.sideId === 0 ? [fleet, pendingNetworkFleets[1]] : [pendingNetworkFleets[0], fleet];
+      log(`Peer fleet ready with ${fleet.length} ships.`);
+      maybeStartNetworkShipSelect(role, budget, lobbyId);
+      return;
+    }
+
+    if (controlMessage.type === 'shipPicked') {
+      if (controlMessage.sideId !== getNetworkRemoteSide(role)) {
+        log(`Ignored control message for unexpected side ${controlMessage.sideId}.`);
+        return;
+      }
+
+      if (!networkBattleSession) {
+        log('Ignored peer ship pick before fleet session was ready.');
+        return;
+      }
+
+      const ship = networkBattleSession.fleets[controlMessage.sideId].find((fleetShip) => fleetShip.uid === controlMessage.uid && fleetShip.alive);
+      if (!ship) {
+        log('Ignored peer ship pick for an unavailable ship.');
+        return;
+      }
+
+      const session = withSelectedShip(networkBattleSession, controlMessage.sideId, controlMessage.uid);
+      networkBattleSession = session;
+      if (appPhase.name === 'networkShipSelect') {
+        appPhase = {
+          ...appPhase,
+          session,
+          selectingSideIds: appPhase.selectingSideIds.filter((sideId) => sideId !== controlMessage.sideId),
+          message: `${getSideName(controlMessage.sideId, 'network')} locked in.`,
+        };
+        renderMenu();
+      }
+      maybeStartSelectedNetworkRound(role, budget, lobbyId, session);
+      return;
+    }
+
+    if (controlMessage.type === 'roundResolved') {
+      if (appPhase.name !== 'networkFight' || !networkBattleSession) {
+        return;
+      }
+
+      if (controlMessage.outcome.kind === 'winner') {
+        resolveNetworkRound(networkBattleSession, controlMessage.outcome.winnerId, role, budget, lobbyId);
+      } else {
+        resolveNetworkMutualDestruction(networkBattleSession, role, budget, lobbyId);
+      }
+      return;
+    }
+  }
+
   const selectedShipPrefix = 'selectedShip:';
   if (role === 'host' && message.startsWith(selectedShipPrefix)) {
     const shipId = message.slice(selectedShipPrefix.length);
@@ -4193,6 +4565,9 @@ function closePeer(): void {
   networkMatchStatus = null;
   pendingHostShip = null;
   pendingJoinerShip = null;
+  pendingNetworkFleets = [null, null];
+  networkBattleSession = null;
+  networkHumanRound = 0;
   if (hadPeer) {
     peerConnectionState = 'closed';
   }
@@ -4421,7 +4796,7 @@ function leaveLobby(): void {
 }
 
 function leaveMatch(): void {
-  if (appPhase.name !== 'networkFleetBuild') {
+  if (appPhase.name !== 'networkFleetBuild' && appPhase.name !== 'networkShipSelect') {
     return;
   }
 
@@ -4454,6 +4829,7 @@ function goBack(): void {
       leaveLobby();
       return;
     case 'networkFleetBuild':
+    case 'networkShipSelect':
       leaveMatch();
       return;
     default:
@@ -4532,6 +4908,7 @@ function formatPhaseStatus(): string {
     case 'lobbyBrowser':
     case 'networkConnecting':
     case 'networkFleetBuild':
+    case 'networkShipSelect':
       return 'Multiplayer setup';
     case 'fighting':
     case 'hotseatFighting':
@@ -4971,7 +5348,7 @@ function hasLivingShips(fleet: readonly FleetShip[]): boolean {
 }
 
 function getSideName(sideId: number, mode: BattleSession['mode'] = 'single'): string {
-  if (mode === 'hotseat') {
+  if (mode === 'hotseat' || mode === 'network') {
     return sideId === 0 ? 'Player 1' : 'Player 2';
   }
 
@@ -5020,10 +5397,18 @@ function isShipSelectSideActive(sideId: PlayerSide): boolean {
     return sideId === 0;
   }
 
+  if (appPhase.name === 'networkShipSelect') {
+    return appPhase.selectingSideIds.includes(sideId);
+  }
+
   return appPhase.name === 'hotseatShipSelect' && appPhase.selectingSideIds.includes(sideId);
 }
 
 function getDefaultShipSelectSide(): PlayerSide {
+  if (appPhase.name === 'networkShipSelect') {
+    return getNetworkLocalSide(appPhase.role);
+  }
+
   return appPhase.name === 'hotseatShipSelect' ? (appPhase.selectingSideIds[0] ?? 0) : 0;
 }
 

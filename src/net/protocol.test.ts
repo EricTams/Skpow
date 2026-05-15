@@ -201,15 +201,17 @@ describe('network protocol packets', () => {
       loadout: ['bolter', 'doubleship'] as const,
       gameplay: { gravityDivisor: 6, speedMultiplier: 1.5 },
       aiDemo: true,
+      shipOverrides: [{ crew: 4, custom: { bolterCharge: 12 } }, undefined] as const,
       startFrame: 0,
       hostPlayerIndex: 0 as const,
       joinerPlayerIndex: 1 as const,
     };
 
-    expect(decodeSessionConfigPacket(encodeSessionConfigPacket(packet))).toEqual(packet);
+    const decoded = decodeSessionConfigPacket(encodeSessionConfigPacket(packet));
+    expect(decoded).toEqual({ ...packet, shipOverrides: [packet.shipOverrides[0], null] });
     expect(decodeGameplayPacket(encodeSessionConfigPacket(packet))).toEqual({
       type: GameplayPacketType.SessionConfig,
-      ...packet,
+      ...decoded,
     });
   });
 

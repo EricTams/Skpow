@@ -1,4 +1,4 @@
-import { createInitialState } from '../sim/state';
+import { createInitialState, type RoundStartShipOverride } from '../sim/state';
 import type { ShipId } from '../sim/shipSpecs';
 import { InputBits, type GameState, type GameplaySettings } from '../sim/types';
 import type { Fixed } from '../sim/fixed';
@@ -122,6 +122,7 @@ export class NetworkMatchSession {
       readonly loadout?: readonly [ShipId, ShipId];
       readonly gameplay?: GameplaySettings;
       readonly aiDemo?: boolean;
+      readonly shipOverrides?: readonly [RoundStartShipOverride | undefined, RoundStartShipOverride | undefined];
       readonly readyImmediately?: boolean;
     } = {},
   ) {
@@ -135,6 +136,7 @@ export class NetworkMatchSession {
         loadout: options.loadout ?? ['frog', 'cannonade'],
         gameplay: options.gameplay ?? { gravityDivisor: 1, speedMultiplier: 1 },
         aiDemo: options.aiDemo ?? false,
+        shipOverrides: options.shipOverrides,
         startFrame: 0,
         hostPlayerIndex: 0,
         joinerPlayerIndex: 1,
@@ -287,7 +289,10 @@ export class NetworkMatchSession {
     this.localPlayerIndex = this.role === 'host' ? config.hostPlayerIndex : config.joinerPlayerIndex;
     this.activeAiDemo = config.aiDemo;
     this.activeRoundId = config.roundId;
-    this.ownerSession = new OwnerAuthoritySession(createInitialState(config.seed, config.loadout, config.gameplay), this.localPlayerIndex);
+    this.ownerSession = new OwnerAuthoritySession(
+      createInitialState(config.seed, config.loadout, config.gameplay, normalizeShipOverrides(config.shipOverrides)),
+      this.localPlayerIndex,
+    );
     this.activeSessionKey = getSessionConfigKey(config);
     this.lastOwnerStateFrame = null;
     this.lastProjectileSpawnFrame = null;
@@ -967,7 +972,13 @@ function isPlayerIndex(value: number): value is PlayerIndex {
 }
 
 function getSessionConfigKey(config: SessionConfigPacket): string {
-  return `${config.roundId}:${config.seed}:${config.loadout[0]}:${config.loadout[1]}:${config.gameplay.gravityDivisor}:${config.gameplay.speedMultiplier}:${config.aiDemo}:${config.hostPlayerIndex}:${config.joinerPlayerIndex}`;
+  return `${config.roundId}:${config.seed}:${config.loadout[0]}:${config.loadout[1]}:${JSON.stringify(config.shipOverrides ?? null)}:${config.gameplay.gravityDivisor}:${config.gameplay.speedMultiplier}:${config.aiDemo}:${config.hostPlayerIndex}:${config.joinerPlayerIndex}`;
+}
+
+function normalizeShipOverrides(
+  overrides: SessionConfigPacket['shipOverrides'],
+): readonly [RoundStartShipOverride | undefined, RoundStartShipOverride | undefined] {
+  return [overrides?.[0] ?? undefined, overrides?.[1] ?? undefined];
 }
 
 function mergeRecoverySnapshots(local: GameState, remote: GameState, localPlayerIndex: PlayerIndex): GameState {

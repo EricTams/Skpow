@@ -87,6 +87,22 @@ describe('network match session', () => {
     expect(joiner.currentState?.ships.map((ship) => ship.shipId)).toEqual(['krab', 'pscout']);
   });
 
+  it('starts both peers with round start ship overrides', () => {
+    const host = new NetworkMatchSession('host', {
+      seed: 123,
+      loadout: ['krab', 'duk'],
+      shipOverrides: [{ crew: 3, custom: { krabLongRange: true } }, { crew: 2, custom: { dukMissileCount: 1 } }],
+    });
+    const joiner = new NetworkMatchSession('joiner');
+    deliverPackets(joiner, host.takeOutgoingPackets());
+
+    expect(host.currentState?.ships[0].crew).toBe(3);
+    expect(host.currentState?.ships[0].custom.krabLongRange).toBe(true);
+    expect(host.currentState?.ships[1].crew).toBe(2);
+    expect(host.currentState?.ships[1].custom.dukMissileCount).toBe(1);
+    expect(joiner.currentState?.ships.map((ship) => ship.crew)).toEqual([3, 2]);
+  });
+
   it('lets the host start a new configured round over an existing joiner session', () => {
     const { joiner } = connectSessions({ seed: 123 });
     const nextHost = new NetworkMatchSession('host', { roundId: 1, seed: 456, loadout: ['gooj', 'kron'] });

@@ -1,4 +1,5 @@
 import type { ShipId } from '../sim/shipSpecs';
+import type { RoundStartShipOverride } from '../sim/state';
 import type { GameState, GameplaySettings, ProjectileState, ShipState } from '../sim/types';
 
 export interface InputPacket {
@@ -111,6 +112,7 @@ export interface SessionConfigPacket {
   readonly loadout: readonly [ShipId, ShipId];
   readonly gameplay: GameplaySettings;
   readonly aiDemo: boolean;
+  readonly shipOverrides?: readonly [RoundStartShipOverride | null | undefined, RoundStartShipOverride | null | undefined];
   readonly startFrame: number;
   readonly hostPlayerIndex: 0 | 1;
   readonly joinerPlayerIndex: 0 | 1;
@@ -120,7 +122,7 @@ export interface SessionReadyPacket {}
 
 export interface SessionReadyAckPacket {}
 
-export const GAMEPLAY_PROTOCOL_VERSION = 9;
+export const GAMEPLAY_PROTOCOL_VERSION = 10;
 const HEADER_LENGTH = 2;
 const ALLOWED_SPEED_MULTIPLIERS = new Set([1, 1.5, 2]);
 const STATE_CHECKPOINT_HEADER_LENGTH = 10;
@@ -373,6 +375,9 @@ export function decodeSessionConfigPacket(bytes: Uint8Array): SessionConfigPacke
   if (!Array.isArray(packet.loadout) || packet.loadout.length !== 2 || !isShipId(packet.loadout[0]) || !isShipId(packet.loadout[1])) {
     throw new Error('Session config packet has an invalid loadout.');
   }
+  if (packet.shipOverrides !== undefined && !isShipOverrides(packet.shipOverrides)) {
+    throw new Error('Session config packet has invalid ship overrides.');
+  }
 
   return packet;
 }
@@ -519,6 +524,10 @@ function isShipId(value: unknown): value is ShipId {
     value === 'bolter' ||
     value === 'shugg'
   );
+}
+
+function isShipOverrides(value: unknown): value is readonly [RoundStartShipOverride | null | undefined, RoundStartShipOverride | null | undefined] {
+  return Array.isArray(value) && value.length === 2 && value.every((override) => override === null || override === undefined || isRecord(override));
 }
 
 function encodeJsonPacket(type: GameplayPacketType, packet: unknown): Uint8Array {
